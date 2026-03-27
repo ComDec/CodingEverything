@@ -1,3 +1,5 @@
+import { normalizeSessionDisplayName } from './session-display-name.js';
+
 export const SessionState = {
   created: 'created',
   idle: 'idle',
@@ -27,6 +29,7 @@ export type SessionContext = Readonly<{
   model: string;
   runtimeOptions: SessionRuntimeOptions;
   createdBy: string;
+  displayName?: string;
 }>;
 
 export type ApprovalMatcherInput = {
@@ -44,7 +47,10 @@ export function createSessionContext(input: {
   model: string;
   runtimeOptions: SessionRuntimeOptions;
   createdBy: string;
+  displayName?: string;
 }): SessionContext {
+  const displayName = normalizeSessionDisplayName(input.displayName);
+
   return Object.freeze({
     cwd: input.cwd,
     allowedRoot: input.allowedRoot,
@@ -55,7 +61,8 @@ export function createSessionContext(input: {
         ? { skills: Object.freeze([...input.runtimeOptions.skills]) }
         : {})
     }),
-    createdBy: input.createdBy
+    createdBy: input.createdBy,
+    ...(displayName ? { displayName } : {})
   });
 }
 

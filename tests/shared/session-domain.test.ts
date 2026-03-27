@@ -53,6 +53,46 @@ describe('session domain', () => {
     });
   });
 
+  it('preserves displayName on immutable session context', () => {
+    const context = createSessionContext({
+      cwd: '/workspace/app',
+      allowedRoot: '/workspace',
+      model: 'sonnet',
+      runtimeOptions: { permissionMode: 'default' },
+      createdBy: 'discord-user-1',
+      displayName: 'pretty-fire'
+    });
+
+    expect(context.displayName).toBe('pretty-fire');
+  });
+
+  it('normalizes invalid and overlong displayName values at the shared boundary', () => {
+    const context = createSessionContext({
+      cwd: '/workspace/app',
+      allowedRoot: '/workspace',
+      model: 'sonnet',
+      runtimeOptions: { permissionMode: 'default' },
+      createdBy: 'discord-user-1',
+      displayName: `  Pretty   Fire_room ${'A'.repeat(120)}  `
+    });
+
+    expect(context.displayName).toMatch(/^pretty-fire-room-a+$/);
+    expect(context.displayName).toHaveLength(100);
+  });
+
+  it('drops displayName when normalization removes all content', () => {
+    const context = createSessionContext({
+      cwd: '/workspace/app',
+      allowedRoot: '/workspace',
+      model: 'sonnet',
+      runtimeOptions: { permissionMode: 'default' },
+      createdBy: 'discord-user-1',
+      displayName: '---___   '
+    });
+
+    expect(context.displayName).toBeUndefined();
+  });
+
   it('downgrades matcher to once when scope is not normalizable', () => {
     expect(
       createApprovalMatcher({

@@ -63,6 +63,7 @@ export async function runTokenlessFlow(): Promise<TokenlessFlowResult> {
       channelId: 'thread-1',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       userId: 'discord-user-1',
       roleIds: ['operator']
     });
@@ -147,6 +148,7 @@ export async function runTokenlessMultiTurnFlow(): Promise<TokenlessMultiTurnFlo
       channelId: 'thread-context',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       userId: 'discord-user-1',
       roleIds: ['operator']
     });

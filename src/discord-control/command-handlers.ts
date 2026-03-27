@@ -55,34 +55,60 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
 
   const now = deps.now ?? (() => new Date().toISOString());
 
+  function prepareCreateSession(input: {
+    cwd: string;
+    model: string;
+    displayName: string;
+    effort?: 'low' | 'medium' | 'high' | 'max';
+    skills?: readonly string[];
+    userId: string;
+    roleIds: string[];
+  }) {
+    assertCanManage(access, input.userId, input.roleIds, 'create sessions');
+    const cwd = assertPathWithinRoots(input.cwd, [...deps.allowedRoots]);
+    const allowedRoot = resolveAllowedRoot(cwd, [...deps.allowedRoots]);
+    const effort = normalizeEffort(input.effort);
+    const skills = normalizeSkills(input.skills);
+
+    return {
+      cwd,
+      allowedRoot,
+      model: input.model,
+      displayName: input.displayName,
+      effort,
+      skills,
+      userId: input.userId,
+      roleIds: input.roleIds
+    };
+  }
+
   return {
+    prepareCreateSession,
     async handleCreateSession(input: {
       channelId: string;
       cwd: string;
       model: string;
+      displayName: string;
       effort?: 'low' | 'medium' | 'high' | 'max';
       skills?: readonly string[];
       userId: string;
       roleIds: string[];
     }): Promise<{ sessionId: string }> {
-      assertCanManage(access, input.userId, input.roleIds, 'create sessions');
-      const cwd = assertPathWithinRoots(input.cwd, [...deps.allowedRoots]);
-      const allowedRoot = resolveAllowedRoot(cwd, [...deps.allowedRoots]);
-      const effort = normalizeEffort(input.effort);
-      const skills = normalizeSkills(input.skills);
+      const prepared = prepareCreateSession(input);
 
       const session = await deps.runnerClient.createSession({
         channelId: input.channelId,
         context: createSessionContext({
-          cwd,
-          allowedRoot,
-          model: input.model,
+          cwd: prepared.cwd,
+          allowedRoot: prepared.allowedRoot,
+          model: prepared.model,
           runtimeOptions: {
             permissionMode: 'default',
-            ...(effort ? { effort } : {}),
-            ...(skills.length > 0 ? { skills } : {})
+            ...(prepared.effort ? { effort: prepared.effort } : {}),
+            ...(prepared.skills.length > 0 ? { skills: prepared.skills } : {})
           },
-          createdBy: input.userId
+          createdBy: prepared.userId,
+          displayName: prepared.displayName
         })
       });
 
@@ -94,8 +120,8 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
         sessionId: session.sessionId,
         metadata: {
           channelId: input.channelId,
-          cwd,
-          model: input.model
+          cwd: prepared.cwd,
+          model: prepared.model
         },
         createdAt: now()
       });

@@ -7,6 +7,7 @@ describe('discord control bot', () => {
   it('logs in, registers commands, and creates a thread-backed session from a slash command', async () => {
     const events = createEventBus();
     const registerCalls: string[][] = [];
+    const registeredCommands: Array<{ name: string; options: Array<{ name: string }> }> = [];
     const createSessionCalls: Array<{ channelId: string; userId: string }> = [];
     const handlers = createCommandHandlers({
       runnerClient: {
@@ -73,8 +74,13 @@ describe('discord control bot', () => {
         on: events.on,
         registerCommands: async (commands) => {
           registerCalls.push(commands.map((command) => command.name));
+          registeredCommands.push(...commands.map((command) => ({
+            name: command.name,
+            options: (command.options ?? []).map((option) => ({ name: option.name }))
+          })));
         }
-      }
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
     });
 
     await bot.start();
@@ -82,14 +88,21 @@ describe('discord control bot', () => {
 
     expect(events.loginCalls).toEqual(['discord-token']);
     expect(registerCalls).toEqual([['session-new']]);
+    expect(registeredCommands[0]?.options.map((option) => option.name)).toEqual([
+      'cwd',
+      'name',
+      'model',
+      'effort',
+      'skills'
+    ]);
     expect(createSessionCalls).toEqual([{ channelId: 'thread-1', userId: 'discord-user-1' }]);
-    expect(channel.createdThreadNames).toEqual(['Claude session']);
+    expect(channel.createdThreadNames).toEqual(['pretty-fire']);
     expect(thread.sentMessages).toEqual([
       expect.objectContaining({
         embeds: [
           expect.objectContaining({
             color: 0x6b7280,
-            description: 'Session session-1\ncwd: /workspace/app\nmodel: sonnet\neffort: default\nskills: none'
+            description: 'Session session-1\nname: pretty-fire\ncwd: /workspace/app\nmodel: sonnet\neffort: default\nskills: none'
           })
         ]
       })
@@ -99,6 +112,256 @@ describe('discord control bot', () => {
         content: 'Session session-1 created in thread thread-1.',
         ephemeral: true
       }
+    ]);
+  });
+
+  it('stores a thread binding so later thread messages continue the created session', async () => {
+    const events = createEventBus();
+    const sendTurnCalls: Array<{ sessionId: string; prompt: string }> = [];
+    const bindingMap = new Map<string, { threadId: string; sessionId: string; createdAt: string; updatedAt: string }>();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-thread-binding-1' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-binding-1');
+    const channel = createFakeChannel(thread);
+    const interaction = createCreateSessionInteraction(channel);
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() {
+          return null;
+        },
+        async listEvents() {
+          return [];
+        },
+        async *subscribeEvents() {},
+        async health() {
+          return { ok: true };
+        },
+        async sendTurn(input) {
+          sendTurnCalls.push(input);
+        },
+        async getSession() {
+          return { sessionId: 'session-thread-binding-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId(threadId) {
+          return bindingMap.get(threadId) ?? null;
+        },
+        upsert(record) {
+          bindingMap.set(record.threadId, record);
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+    await events.emit('messageCreate', {
+      author: { id: 'discord-user-1', bot: false },
+      content: 'hi',
+      channelId: 'thread-binding-1',
+      channel: thread,
+      member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } }
+    });
+
+    expect(sendTurnCalls).toEqual([
+      { sessionId: 'session-thread-binding-1', prompt: 'hi' }
+    ]);
+  });
+
+  it('uses the resolved display name for new thread creation and summary rendering', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-explicit-name-1' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-explicit-name-1');
+    const channel = createFakeChannel(thread);
+    const interaction = createCreateSessionInteraction(channel, {
+      values: { cwd: '/workspace/app', model: 'sonnet', name: 'Deploy War Room' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-explicit-name-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId() {
+          return null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    expect(channel.createdThreadNames).toEqual(['deploy-war-room']);
+    expect(thread.sentMessages).toEqual([
+      expect.objectContaining({
+        embeds: [expect.objectContaining({ description: expect.stringContaining('name: deploy-war-room') })]
+      })
+    ]);
+  });
+
+  it('falls back to a generated display name when name is omitted', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-generated-name-1' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-generated-name-1');
+    const channel = createFakeChannel(thread);
+    const interaction = createCreateSessionInteraction(channel, {
+      values: { cwd: '/workspace/app', model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-generated-name-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId() {
+          return null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    expect(channel.createdThreadNames).toEqual(['pretty-fire']);
+  });
+
+  it('keeps an existing thread title unchanged while still storing the resolved display name', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-existing-thread-1' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const existingThread = createFakeThread('thread-existing');
+    const interaction = createCreateSessionInteraction(existingThread as any, {
+      values: { cwd: '/workspace/app', model: 'sonnet', name: 'Deploy War Room' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-existing-thread-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId() {
+          return null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    expect(existingThread.sentMessages).toEqual([
+      expect.objectContaining({
+        embeds: [expect.objectContaining({ description: expect.stringContaining('name: deploy-war-room') })]
+      })
     ]);
   });
 
@@ -225,6 +488,7 @@ describe('discord control bot', () => {
         ephemeral: true
       }
     ]);
+    expect(channel.createdThreadNames).toEqual([]);
   });
 
   it('creates a session without touching interaction.channel when that getter throws', async () => {

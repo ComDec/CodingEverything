@@ -5,6 +5,7 @@ import type { BindingRecord, SessionRecord } from '../shared/db/repositories.js'
 import { renderSessionMessage } from './message-renderer.js';
 import { replaySessionEvents } from './replay-controller.js';
 import { applyRunnerEvent, createRenderModel, startNewTurn, type BashDetailModel, type RunnerEventEnvelope, type SessionRenderModel } from './render-model.js';
+import { resolveSessionDisplayName } from './session-display-name.js';
 import { recoverStartupState } from './startup-recovery.js';
 
 export type DiscordCommandDefinition = Readonly<{
@@ -39,9 +40,10 @@ type CreatedThreadChannel = ThreadMessageChannel & Readonly<{
 
 type BindingReader = Readonly<{
   getByThreadId(threadId: string): BindingRecord | null;
+  upsert?(record: BindingRecord): void;
   listAll?(): readonly BindingRecord[];
   deleteByThreadId?(threadId: string): void;
-}>;
+}>; 
 
 type SessionReader = Readonly<{
   listActive?(): readonly SessionRecord[];
@@ -82,7 +84,8 @@ export type DiscordControlBotDeps = Readonly<{
   discord: DiscordGateway;
   logger?: Pick<Console, 'info' | 'error'>;
   now?: () => string;
-}>;
+  random?: () => number;
+}>; 
 
 const COMMANDS: readonly DiscordCommandDefinition[] = [
   {
@@ -90,6 +93,7 @@ const COMMANDS: readonly DiscordCommandDefinition[] = [
     description: 'Create a Claude runner session in a thread',
     options: [
       { type: 'string', name: 'cwd', description: 'Working directory', required: true },
+      { type: 'string', name: 'name', description: 'Optional session display name', required: false },
       { type: 'string', name: 'model', description: 'Claude model', required: false },
       { type: 'string', name: 'effort', description: 'Reasoning effort: low, medium, high, max', required: false },
       { type: 'string', name: 'skills', description: 'Comma-separated Claude skills to preload', required: false }
@@ -186,29 +190,51 @@ async function handleInteraction(deps: DiscordControlBotDeps, value: unknown): P
       `Handling /session-new for user ${value.user.id} in channel ${String(value.channelId)}.`
     );
     const sourceChannel = (await deps.discord.getChannel?.(value.channelId)) ?? getOptionalInteractionChannel(value);
-    deps.logger?.info?.(
-      `Resolved source channel for /session-new: ${sourceChannel ? 'present' : 'missing'}.`
-    );
-    const thread = await ensureThreadChannel(sourceChannel);
-    deps.logger?.info?.(`Created or reused thread ${thread.id} for /session-new.`);
-    const session = await deps.handlers.handleCreateSession({
-      channelId: thread.id,
+    const displayName = resolveSessionDisplayName({
+      rawName: value.options.getString('name'),
+      random: deps.random
+    });
+    const prepared = deps.handlers.prepareCreateSession({
       cwd: value.options.getString('cwd') ?? process.cwd(),
       model: value.options.getString('model') ?? 'sonnet',
+      displayName,
       effort: parseEffortOption(value.options.getString('effort')),
       skills: parseSkillsOption(value.options.getString('skills')),
       userId: value.user.id,
       roleIds: getRoleIds(value.member)
+    });
+    deps.logger?.info?.(
+      `Resolved source channel for /session-new: ${sourceChannel ? 'present' : 'missing'}.`
+    );
+    const thread = await ensureThreadChannel(sourceChannel, displayName);
+    deps.logger?.info?.(`Created or reused thread ${thread.id} for /session-new.`);
+    const session = await deps.handlers.handleCreateSession({
+      channelId: thread.id,
+      cwd: prepared.cwd,
+      model: prepared.model,
+      displayName: prepared.displayName,
+      effort: prepared.effort,
+      skills: prepared.skills,
+      userId: prepared.userId,
+      roleIds: prepared.roleIds
+    });
+    const bindingTimestamp = deps.now?.() ?? new Date().toISOString();
+    deps.bindings.upsert?.({
+      threadId: thread.id,
+      sessionId: session.sessionId,
+      createdAt: bindingTimestamp,
+      updatedAt: bindingTimestamp
     });
 
     await sendChannelMessage(
       thread as ThreadMessageChannel,
       buildSessionSummaryMessage({
         sessionId: session.sessionId,
-        cwd: value.options.getString('cwd') ?? process.cwd(),
-        model: value.options.getString('model') ?? 'sonnet',
-        effort: parseEffortOption(value.options.getString('effort')),
-        skills: parseSkillsOption(value.options.getString('skills'))
+        displayName: prepared.displayName,
+        cwd: prepared.cwd,
+        model: prepared.model,
+        effort: prepared.effort,
+        skills: prepared.skills
       })
     );
 
@@ -819,6 +845,7 @@ function summarizeToolCompletion(detail: Pick<ToolCompletionSummary, 'toolName' 
 
 function buildSessionSummaryMessage(input: {
   sessionId: string;
+  displayName: string;
   cwd: string;
   model: string;
   effort?: 'low' | 'medium' | 'high' | 'max';
@@ -826,6 +853,7 @@ function buildSessionSummaryMessage(input: {
 }) {
   const lines = [
     `Session ${input.sessionId}`,
+    `name: ${input.displayName}`,
     `cwd: ${input.cwd}`,
     `model: ${input.model}`,
     `effort: ${input.effort ?? 'default'}`,
@@ -945,7 +973,7 @@ function truncateForCodeBlock(text: string, maxLength = 1500): string {
   return text.length <= maxLength ? text : `${text.slice(0, maxLength)}\n...`;
 }
 
-async function ensureThreadChannel(channel: unknown): Promise<CreatedThreadChannel> {
+async function ensureThreadChannel(channel: unknown, threadName: string): Promise<CreatedThreadChannel> {
   if (isThreadChannel(channel)) {
     return channel;
   }
@@ -960,7 +988,7 @@ async function ensureThreadChannel(channel: unknown): Promise<CreatedThreadChann
     throw new Error('Discord channel cannot create threads');
   }
 
-  return maybeChannel.threads.create({ name: 'Claude session' });
+  return maybeChannel.threads.create({ name: threadName });
 }
 
 function getRoleIds(member: unknown): string[] {

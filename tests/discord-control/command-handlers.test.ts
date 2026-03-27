@@ -31,6 +31,7 @@ describe('command handlers', () => {
       channelId: 'thread-1',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       userId: 'discord-user-1',
       roleIds: ['operator']
     });
@@ -44,7 +45,8 @@ describe('command handlers', () => {
           allowedRoot: '/workspace',
           model: 'sonnet',
           runtimeOptions: { permissionMode: 'default' },
-          createdBy: 'discord-user-1'
+          createdBy: 'discord-user-1',
+          displayName: 'pretty-fire'
         }
       }
     ]);
@@ -69,6 +71,7 @@ describe('command handlers', () => {
       channelId: 'thread-effort-1',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       effort: 'high' as 'high',
       userId: 'discord-user-1',
       roleIds: ['operator']
@@ -81,7 +84,8 @@ describe('command handlers', () => {
         allowedRoot: '/workspace',
         model: 'sonnet',
         runtimeOptions: { permissionMode: 'default', effort: 'high' },
-        createdBy: 'discord-user-1'
+        createdBy: 'discord-user-1',
+        displayName: 'pretty-fire'
       }
     });
   });
@@ -105,6 +109,7 @@ describe('command handlers', () => {
       channelId: 'thread-skills-1',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       skills: ['project-memory', ' safe-bash ', '', 'project-memory'],
       userId: 'discord-user-1',
       roleIds: ['operator']
@@ -120,9 +125,37 @@ describe('command handlers', () => {
           permissionMode: 'default',
           skills: ['project-memory', 'safe-bash']
         },
-        createdBy: 'discord-user-1'
+        createdBy: 'discord-user-1',
+        displayName: 'pretty-fire'
       }
     });
+  });
+
+  it('writes the resolved display name into session context', async () => {
+    const { repositories } = createTestContext();
+    const runnerClient = createRunnerClientDouble({
+      createSessionResult: { sessionId: 'session-name-1' }
+    });
+    const handlers = createCommandHandlers({
+      runnerClient,
+      audit: repositories.audit,
+      access: {
+        canManageSessions: () => true
+      },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+
+    await handlers.handleCreateSession({
+      channelId: 'thread-name-1',
+      cwd: '/workspace/app',
+      model: 'sonnet',
+      displayName: 'pretty-fire',
+      userId: 'discord-user-1',
+      roleIds: ['operator']
+    } as any);
+
+    expect(runnerClient.createSessionCalls.at(-1)?.context.displayName).toBe('pretty-fire');
   });
 
   it('resolves a pending permission prompt', async () => {
@@ -272,6 +305,7 @@ describe('command handlers', () => {
         channelId: 'thread-2',
         cwd: '/workspace/app',
         model: 'sonnet',
+        displayName: 'pretty-fire',
         userId: 'discord-user-2',
         roleIds: []
       })
@@ -298,6 +332,7 @@ describe('command handlers', () => {
       channelId: 'thread-7',
       cwd: '/workspace/app',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       userId: 'discord-user-7',
       roleIds: ['admin']
     });
@@ -383,6 +418,7 @@ describe('command handlers', () => {
         channelId: 'thread-secure',
         cwd: '/tmp/outside',
         model: 'sonnet',
+        displayName: 'pretty-fire',
         userId: 'discord-user-8',
         roleIds: ['operator']
       })
@@ -392,6 +428,7 @@ describe('command handlers', () => {
       channelId: 'thread-secure',
       cwd: '/workspace/project',
       model: 'sonnet',
+      displayName: 'pretty-fire',
       userId: 'discord-user-8',
       roleIds: ['operator']
     });
@@ -404,7 +441,8 @@ describe('command handlers', () => {
           allowedRoot: '/workspace',
           model: 'sonnet',
           runtimeOptions: { permissionMode: 'default' },
-          createdBy: 'discord-user-8'
+          createdBy: 'discord-user-8',
+          displayName: 'pretty-fire'
         }
       }
     ]);
@@ -433,6 +471,7 @@ function createRunnerClientDouble(options?: {
       model: string;
       runtimeOptions: { permissionMode: string };
       createdBy: string;
+      displayName?: string;
     };
   }> = [];
   const resolvePromptCalls: Array<{
@@ -450,14 +489,15 @@ function createRunnerClientDouble(options?: {
     answerQuestionCalls,
     async createSession(input: {
       channelId: string;
-      context: {
-        cwd: string;
-        allowedRoot: string;
-        model: string;
-        runtimeOptions: { permissionMode: string };
-        createdBy: string;
-      };
-    }) {
+        context: {
+          cwd: string;
+          allowedRoot: string;
+          model: string;
+          runtimeOptions: { permissionMode: string };
+          createdBy: string;
+          displayName?: string;
+        };
+      }) {
       createSessionCalls.push(input);
       return options?.createSessionResult ?? { sessionId: 'session-1' };
     },

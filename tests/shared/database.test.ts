@@ -129,6 +129,32 @@ describe('repositories', () => {
     database.close();
   });
 
+  it('round-trips displayName through session context_json storage', async () => {
+    const databasePath = await createTempDatabasePath();
+    const database = createDatabase({ filename: databasePath });
+    const repositories = createRepositories(database);
+
+    repositories.sessions.insert({
+      id: 'session-1',
+      state: SessionState.idle,
+      runtimeSessionId: null,
+      context: createSessionContext({
+        cwd: '/workspace/app',
+        allowedRoot: '/workspace',
+        model: 'sonnet',
+        runtimeOptions: { permissionMode: 'default' },
+        createdBy: 'discord-user-1',
+        displayName: 'pretty-fire'
+      }),
+      createdAt: '2026-03-26T00:00:00.000Z',
+      updatedAt: '2026-03-26T00:00:00.000Z'
+    });
+
+    expect(repositories.sessions.getById('session-1')?.context.displayName).toBe('pretty-fire');
+
+    database.close();
+  });
+
   it('stores pending prompts and returns the active prompt for a session', async () => {
     const databasePath = await createTempDatabasePath();
     const database = createDatabase({ filename: databasePath });
