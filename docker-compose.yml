@@ -1,0 +1,40 @@
+services:
+  runner:
+    build: .
+    working_dir: /app
+    command: ["npm", "run", "runner"]
+    environment:
+      RUNNER_PORT: 3000
+      RUNNER_DATABASE_PATH: /data/runner.db
+      ALLOWED_ROOTS: /workspace
+      SESSION_MANAGER_USER_IDS: ${SESSION_MANAGER_USER_IDS:-}
+      SESSION_MANAGER_ROLE_IDS: ${SESSION_MANAGER_ROLE_IDS:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-sonnet}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - runner-data:/data
+      - .:/app
+
+  discord-control:
+    build: .
+    working_dir: /app
+    command: ["npm", "run", "discord"]
+    environment:
+      RUNNER_DATABASE_PATH: /data/runner.db
+      RUNNER_ORIGIN: http://runner:3000
+      ALLOWED_ROOTS: /workspace
+      SESSION_MANAGER_USER_IDS: ${SESSION_MANAGER_USER_IDS:-}
+      SESSION_MANAGER_ROLE_IDS: ${SESSION_MANAGER_ROLE_IDS:-}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-sonnet}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      - runner
+    volumes:
+      - runner-data:/data
+      - .:/app
+
+volumes:
+  runner-data:
