@@ -18,6 +18,16 @@ This file is for coding agents working in this repository.
 
 - ALWAYS Create new branch or worktree if you're asked to add new feats. or fix bugs.
 
+## Branch And Release Workflow
+
+- `main` is the released branch. Only merge tested release candidates into `main`.
+- `dev` is the integration branch. It is the default base for new development work.
+- Start every new feature or bugfix from a fresh `feat/*` branch created from `dev`, preferably in a dedicated worktree.
+- Validate the feature branch first with targeted tests, full tests, build checks, and any relevant smoke/manual checks.
+- Merge feature branches into `dev` for second-round integration testing before promoting anything to `main`.
+- After `dev` passes the second test pass, merge `dev` into `main` and create a new release tag in `vX.Y.Z` format.
+- Delete merged `feat/*` branches from the remote once their work is safely present in `dev` or `main`.
+
 
 ## Rules Files
 
