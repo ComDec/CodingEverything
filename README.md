@@ -43,9 +43,10 @@
 - `npm run smoke:runner` supports either `ANTHROPIC_API_KEY` or an already-authenticated local Claude CLI session (for example a Claude Max login on the machine).
 - For local-subscription mode, set `CLAUDE_CODE_EXECUTABLE` if `claude` is not on your default `PATH`.
 - `npm run discord` starts a real `discord.js` client, registers the `session-new` slash command, and uses the shared SQLite audit/binding data plus the HTTP runner client.
-- `/session-new` supports `cwd`, `model`, `effort`, and `skills`.
+- `/session-new` supports `name`, `cwd`, `model`, `effort`, and `skills`.
+- `name` is optional; when omitted or normalized to empty, the bot generates a short kebab-case fallback such as `pretty-fire` and uses it for the session display name and any newly created thread title.
 - `effort` accepts `low`, `medium`, `high`, or `max` and is passed through to Claude Code query options.
 - `skills` accepts a comma-separated list of Claude skills to preload into the session context.
 - Discord command actions are deny-by-default for RBAC; if both session-manager allowlists are empty, startup warns and session creation/prompt actions remain blocked.
-- The slash command only accepts `cwd`; the bot resolves the matching allowed root from `ALLOWED_ROOTS` and ignores any user attempt to widen access.
+- The slash command only accepts `cwd` for workspace access; the bot resolves the matching allowed root from `ALLOWED_ROOTS` and ignores any user attempt to widen access.
 - Runner and Discord control must point at the same `RUNNER_DATABASE_PATH` so restart recovery and thread bindings can be shared across processes.
