@@ -191,57 +191,121 @@ describe('discord control bot', () => {
     ]);
   });
 
-  it('uses the resolved display name for new thread creation and summary rendering', async () => {
-    const events = createEventBus();
-    const handlers = createCommandHandlers({
-      runnerClient: {
-        async createSession() {
-          return { sessionId: 'session-explicit-name-1' };
-        },
-        async resolvePrompt() {
-          return { status: 'resolved' as const };
-        },
-        async answerQuestion() {}
-      },
-      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
-      access: { canManageSessions: () => true },
-      allowedRoots: ['/workspace'],
-      now: () => '2026-03-25T00:00:00.000Z'
-    });
+  it('continues a named session after restart from persisted binding without creating a new thread', async () => {
+    const initialCreateSessionCalls: number[] = [];
+    const restartedCreateSessionCalls: number[] = [];
+    const sendTurnCalls: Array<{ sessionId: string; prompt: string }> = [];
+    const bindingMap = new Map<string, { threadId: string; sessionId: string; createdAt: string; updatedAt: string }>();
     const thread = createFakeThread('thread-explicit-name-1');
-    const channel = createFakeChannel(thread);
-    const interaction = createCreateSessionInteraction(channel, {
-      values: { cwd: '/workspace/app', model: 'sonnet', name: 'Deploy War Room' }
-    });
-    const bot = createDiscordControlBot({
-      token: 'discord-token',
-      clientId: 'client-1',
-      handlers,
-      runnerClient: {
-        async getPendingPrompt() { return null; },
-        async listEvents() { return []; },
-        async *subscribeEvents() {},
-        async health() { return { ok: true }; },
-        async sendTurn() {},
-        async getSession() {
-          return { sessionId: 'session-explicit-name-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
-        }
-      },
-      bindings: {
-        getByThreadId() {
-          return null;
-        }
-      },
-      discord: {
-        login: events.login,
-        destroy: events.destroy,
-        on: events.on,
-        registerCommands: async () => {}
+    const { channel, startBot, emitInteraction } = createNamedSessionHarness({
+      thread,
+      bindingMap,
+      createSessionCalls: initialCreateSessionCalls,
+      sessionId: 'session-explicit-name-1',
+      interactionValues: {
+        cwd: '/workspace/app',
+        model: 'sonnet',
+        name: 'Deploy War Room'
       }
     });
 
-    await bot.start();
-    await events.emit('interactionCreate', interaction);
+    await startBot();
+    await emitInteraction();
+
+    expect(bindingMap.get('thread-explicit-name-1')).toEqual({
+      threadId: 'thread-explicit-name-1',
+      sessionId: 'session-explicit-name-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z'
+    });
+
+    const restartedHarness = createNamedSessionHarness({
+      thread,
+      bindingMap,
+      sendTurnCalls,
+      createSessionCalls: restartedCreateSessionCalls,
+      sessionId: 'session-explicit-name-1',
+      interactionValues: {
+        cwd: '/workspace/app',
+        model: 'sonnet',
+        name: 'Deploy War Room'
+      }
+    });
+
+    await restartedHarness.startBot();
+    await restartedHarness.emitMessage('hi');
+
+    expect(channel.createdThreadNames).toEqual(['deploy-war-room']);
+    expect(restartedHarness.threadChannel.sentContents).toHaveLength(1);
+    expect(isWaitingPlaceholderFrame(restartedHarness.threadChannel.sentContents[0] ?? '')).toBe(true);
+    expect(thread.sentMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        embeds: [expect.objectContaining({ description: expect.stringContaining('name: deploy-war-room') })]
+      })
+    ]));
+    expect(initialCreateSessionCalls).toEqual([1]);
+    expect(restartedCreateSessionCalls).toEqual([]);
+    expect(sendTurnCalls).toEqual([
+      { sessionId: 'session-explicit-name-1', prompt: 'hi' }
+    ]);
+  });
+
+  it('continues a named session immediately after creation for the first follow-up thread message', async () => {
+    const createSessionCalls: number[] = [];
+    const sendTurnCalls: Array<{ sessionId: string; prompt: string }> = [];
+    const bindingMap = new Map<string, { threadId: string; sessionId: string; createdAt: string; updatedAt: string }>();
+    const thread = createFakeThread('thread-explicit-name-immediate-1');
+    const harness = createNamedSessionHarness({
+      thread,
+      bindingMap,
+      sendTurnCalls,
+      createSessionCalls,
+      sessionId: 'session-explicit-name-immediate-1',
+      interactionValues: {
+        cwd: '/workspace/app',
+        model: 'sonnet',
+        name: 'Deploy War Room'
+      }
+    });
+
+    await harness.startBot();
+    await harness.emitInteraction();
+    await harness.emitMessage('hi');
+
+    expect(bindingMap.get('thread-explicit-name-immediate-1')).toEqual({
+      threadId: 'thread-explicit-name-immediate-1',
+      sessionId: 'session-explicit-name-immediate-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z'
+    });
+    expect(harness.channel.createdThreadNames).toEqual(['deploy-war-room']);
+    expect(harness.threadChannel.sentContents).toHaveLength(1);
+    expect(isWaitingPlaceholderFrame(harness.threadChannel.sentContents[0] ?? '')).toBe(true);
+    expect(thread.sentMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        embeds: [expect.objectContaining({ description: expect.stringContaining('name: deploy-war-room') })]
+      })
+    ]));
+    expect(createSessionCalls).toEqual([1]);
+    expect(sendTurnCalls).toEqual([
+      { sessionId: 'session-explicit-name-immediate-1', prompt: 'hi' }
+    ]);
+  });
+
+  it('uses the resolved display name for new thread creation and summary rendering', async () => {
+    const thread = createFakeThread('thread-explicit-name-1');
+    const { channel, interaction, startBot, emitInteraction } = createNamedSessionHarness({
+      thread,
+      sessionId: 'session-explicit-name-1',
+      interactionValues: {
+        cwd: '/workspace/app',
+        model: 'sonnet',
+        name: 'Deploy War Room'
+      }
+    });
+
+    await startBot();
+    await emitInteraction();
 
     expect(channel.createdThreadNames).toEqual(['deploy-war-room']);
     expect(thread.sentMessages).toEqual([
@@ -434,53 +498,43 @@ describe('discord control bot', () => {
     ]);
   });
 
-  it('replies with a user-facing error when session creation input is invalid', async () => {
-    const events = createEventBus();
-    const interaction = createCreateSessionInteraction(undefined, {
-      channelId: 'channel-invalid',
-      values: { cwd: '/tmp/not-allowed', model: 'sonnet' }
-    });
-    const thread = createFakeThread('thread-invalid');
-    const channel = createFakeChannel(thread);
-    const handlers = createCommandHandlers({
-      runnerClient: {
-        async createSession() {
-          return { sessionId: 'session-invalid' };
-        },
-        async resolvePrompt() {
-          return { status: 'resolved' as const };
-        },
-        async answerQuestion() {}
-      },
-      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
-      access: { canManageSessions: () => true },
-      allowedRoots: ['/workspace'],
-      now: () => '2026-03-25T00:00:00.000Z'
-    });
-    const bot = createDiscordControlBot({
-      token: 'discord-token',
-      clientId: 'client-1',
-      handlers,
-      runnerClient: {
-        async getPendingPrompt() { return null; },
-        async listEvents() { return []; },
-        async *subscribeEvents() {},
-        async health() { return { ok: true }; },
-        async sendTurn() {},
-        async getSession() { return { sessionId: 'session-invalid', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null }; }
-      },
-      bindings: { getByThreadId() { return null; } },
-      discord: {
-        login: events.login,
-        destroy: events.destroy,
-        on: events.on,
-        registerCommands: async () => {},
-        getChannel: async () => channel
+  it('does not create a thread for an unauthorized session-new request', async () => {
+    const createSessionCalls: number[] = [];
+    const { channel, interaction, startBot, emitInteraction } = createRejectedSessionNewHarness({
+      canManageSessions: false,
+      createSessionCalls,
+      interaction: {
+        channelId: 'channel-unauthorized',
+        userId: 'discord-user-2',
+        roleIds: []
       }
     });
 
-    await bot.start();
-    await events.emit('interactionCreate', interaction);
+    await startBot();
+    await emitInteraction();
+
+    expect(interaction.replies).toEqual([
+      {
+        content: 'User is not authorized to create sessions',
+        ephemeral: true
+      }
+    ]);
+    expect(channel.createdThreadNames).toEqual([]);
+    expect(createSessionCalls).toEqual([]);
+  });
+
+  it('does not create a thread for an invalid cwd session-new request', async () => {
+    const createSessionCalls: number[] = [];
+    const { channel, interaction, startBot, emitInteraction } = createRejectedSessionNewHarness({
+      createSessionCalls,
+      interaction: {
+        channelId: 'channel-invalid',
+        values: { cwd: '/tmp/not-allowed', model: 'sonnet' }
+      }
+    });
+
+    await startBot();
+    await emitInteraction();
 
     expect(interaction.replies).toEqual([
       {
@@ -489,6 +543,7 @@ describe('discord control bot', () => {
       }
     ]);
     expect(channel.createdThreadNames).toEqual([]);
+    expect(createSessionCalls).toEqual([]);
   });
 
   it('creates a session without touching interaction.channel when that getter throws', async () => {
@@ -2373,6 +2428,98 @@ describe('discord control bot', () => {
     }
   });
 
+  it('does not leave the waiting placeholder as the terminal state after streamed text arrives', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const events = createEventBus();
+    const channel = createEditableThreadChannel();
+    let completedTurns = 0;
+
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers: createCommandHandlers({
+        runnerClient: {
+          async createSession() {
+            return { sessionId: 'session-1' };
+          },
+          async resolvePrompt() {
+            return { status: 'resolved' as const };
+          },
+          async answerQuestion() {}
+        },
+        audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: 'session-1', metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+        access: { canManageSessions: () => true },
+        allowedRoots: ['/workspace'],
+        now: () => '2026-03-25T00:00:00.000Z'
+      }),
+      runnerClient: {
+        async getPendingPrompt() {
+          return null;
+        },
+        async listEvents(input) {
+          if (completedTurns === 1 && input.fromSeq === 1) {
+            return [
+              { seq: 1, event: { type: 'text.delta', messageId: 'msg-1', delta: 'first reply' } },
+              { seq: 2, event: { type: 'turn.completed', exitCode: 0 } }
+            ];
+          }
+
+          return [];
+        },
+        async *subscribeEvents() {},
+        async health() {
+          return { ok: true };
+        },
+        async sendTurn() {
+          completedTurns += 1;
+        },
+        async getSession() {
+          return { sessionId: 'session-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId(threadId) {
+          return threadId === 'thread-animated-waiting'
+            ? {
+                threadId: 'thread-animated-waiting',
+                sessionId: 'session-1',
+                createdAt: '2026-03-25T00:00:00.000Z',
+                updatedAt: '2026-03-25T00:00:00.000Z'
+              }
+            : null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getThreadChannel: async () => channel
+      }
+    });
+
+    try {
+      await bot.start();
+      await events.emit('messageCreate', {
+        author: { bot: false, id: 'discord-user-1' },
+        content: 'hello',
+        channelId: 'thread-animated-waiting',
+        channel,
+        member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } }
+      });
+
+      expect(channel.sentContents[0]).toBe('Typing...');
+      expect(channel.editCalls).toEqual([
+        { messageId: 'message-1', content: 'first reply' }
+      ]);
+      expect(channel.editedContents.at(-1)).toBe('first reply');
+      expect(channel.editedContents.every((value) => !isWaitingPlaceholderFrame(value))).toBe(true);
+    } finally {
+      await bot.stop();
+      randomSpy.mockRestore();
+    }
+  });
+
   it('starts the next Discord turn on the same runner session after the previous turn completes', async () => {
     const events = createEventBus();
     const channel = createEditableThreadChannel();
@@ -3936,11 +4083,187 @@ function createFakeChannel(thread: { id: string }) {
   };
 }
 
+function createUserThreadMessage(thread: { id: string }, content: string) {
+  return {
+    author: { id: 'discord-user-1', bot: false },
+    content,
+    channelId: thread.id,
+    channel: thread,
+    member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } }
+  };
+}
+
+function createNamedSessionHarness(options: {
+  thread: ReturnType<typeof createFakeThread>;
+  bindingMap?: Map<string, { threadId: string; sessionId: string; createdAt: string; updatedAt: string }>;
+  sendTurnCalls?: Array<{ sessionId: string; prompt: string }>;
+  createSessionCalls?: number[];
+  interactionValues?: {
+    cwd?: string;
+    model?: string;
+    name?: string;
+  };
+  sessionId?: string;
+}) {
+  const events = createEventBus();
+  const channel = createFakeChannel(options.thread);
+  const threadChannel = createEditableThreadChannel();
+  const rawThread = {
+    id: options.thread.id,
+    isThread: () => true,
+    async send(content: string | { content?: string }) {
+      return { id: `raw-${typeof content === 'string' ? content : content.content ?? 'message'}` };
+    },
+    async edit() {
+      throw new Error('raw discord thread edit should not be used in named session harness');
+    }
+  };
+  const interaction = createCreateSessionInteraction(channel, {
+    values: {
+      cwd: '/workspace/app',
+      model: 'sonnet',
+      name: 'Deploy War Room',
+      ...(options.interactionValues ?? {})
+    }
+  });
+  const sessionId = options.sessionId ?? 'session-explicit-name-1';
+  const bot = createDiscordControlBot({
+    token: 'discord-token',
+    clientId: 'client-1',
+    handlers: createSessionCommandHandlers(sessionId, options.createSessionCalls),
+    runnerClient: {
+      async getPendingPrompt() {
+        return null;
+      },
+      async listEvents() {
+        return [];
+      },
+      async *subscribeEvents() {},
+      async health() {
+        return { ok: true };
+      },
+      async sendTurn(input) {
+        options.sendTurnCalls?.push(input);
+      },
+      async getSession() {
+        return { sessionId, state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+      }
+    },
+    bindings: {
+      getByThreadId(threadId) {
+        return options.bindingMap?.get(threadId) ?? null;
+      },
+      upsert(record) {
+        options.bindingMap?.set(record.threadId, record);
+      }
+    },
+    discord: {
+      login: events.login,
+      destroy: events.destroy,
+      on: events.on,
+      registerCommands: async () => {},
+      getThreadChannel: async (threadId) => threadId === options.thread.id ? threadChannel : null
+    },
+    now: () => '2026-03-25T00:00:00.000Z'
+  });
+
+  return {
+    channel,
+    threadChannel,
+    interaction,
+    startBot: () => bot.start(),
+    emitInteraction: () => events.emit('interactionCreate', interaction),
+    emitMessage: (content: string) => events.emit('messageCreate', createUserThreadMessage(rawThread, content))
+  };
+}
+
+function createRejectedSessionNewHarness(options?: {
+  canManageSessions?: boolean;
+  createSessionCalls?: number[];
+  interaction?: {
+    channelId?: string;
+    userId?: string;
+    roleIds?: string[];
+    values?: Record<string, string>;
+  };
+}) {
+  const events = createEventBus();
+  const thread = createFakeThread('thread-rejected-session-new');
+  const channel = createFakeChannel(thread);
+  const interaction = createCreateSessionInteraction(undefined, options?.interaction);
+  const bot = createDiscordControlBot({
+    token: 'discord-token',
+    clientId: 'client-1',
+    handlers: createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          options?.createSessionCalls?.push(1);
+          return { sessionId: 'session-rejected-session-new' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => options?.canManageSessions ?? true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    }),
+    runnerClient: {
+      async getPendingPrompt() { return null; },
+      async listEvents() { return []; },
+      async *subscribeEvents() {},
+      async health() { return { ok: true }; },
+      async sendTurn() {},
+      async getSession() {
+        return { sessionId: 'session-rejected-session-new', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+      }
+    },
+    bindings: { getByThreadId() { return null; } },
+    discord: {
+      login: events.login,
+      destroy: events.destroy,
+      on: events.on,
+      registerCommands: async () => {},
+      getChannel: async () => channel
+    }
+  });
+
+  return {
+    channel,
+    interaction,
+    startBot: () => bot.start(),
+    emitInteraction: () => events.emit('interactionCreate', interaction)
+  };
+}
+
+function createSessionCommandHandlers(sessionId: string, createSessionCalls?: number[]) {
+  return createCommandHandlers({
+    runnerClient: {
+      async createSession() {
+        createSessionCalls?.push(1);
+        return { sessionId };
+      },
+      async resolvePrompt() {
+        return { status: 'resolved' as const };
+      },
+      async answerQuestion() {}
+    },
+    audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+    access: { canManageSessions: () => true },
+    allowedRoots: ['/workspace'],
+    now: () => '2026-03-25T00:00:00.000Z'
+  });
+}
+
 function createCreateSessionInteraction(
   channel?: ReturnType<typeof createFakeChannel>,
   options?: {
     channelId?: string;
     throwOnChannelAccess?: boolean;
+    userId?: string;
+    roleIds?: string[];
     values?: Record<string, string>;
   }
 ) {
@@ -3952,8 +4275,12 @@ function createCreateSessionInteraction(
     isButton: () => false,
     commandName: 'session-new',
     channelId: options?.channelId ?? 'channel-1',
-    user: { id: 'discord-user-1' },
-    member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } },
+    user: { id: options?.userId ?? 'discord-user-1' },
+    member: {
+      roles: {
+        cache: new Map((options?.roleIds ?? ['operator']).map((roleId) => [roleId, { id: roleId }]))
+      }
+    },
     options: {
       getString(name: string) {
         const values: Record<string, string> = {
