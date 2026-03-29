@@ -37,7 +37,7 @@ export async function startDiscordControlFromEnv(
     token: config.discordToken,
     clientId: config.discordClientId,
     handlers,
-    runnerClient,
+    runnerClient: runnerClient as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
     bindings: repositories.bindings,
     sessions: repositories.sessions,
     deliveryState: repositories.deliveryState,

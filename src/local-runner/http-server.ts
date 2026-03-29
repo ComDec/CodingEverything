@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createDatabase } from '../shared/db/database.js';
@@ -5,6 +6,7 @@ import { createRepositories } from '../shared/db/repositories.js';
 import type { SessionState } from '../shared/domain/session.js';
 import { createEventStreamBroker } from './event-stream.js';
 import { createSessionOrchestrator } from './session-orchestrator.js';
+import { createWorkdirCatalog } from './workdir-catalog.js';
 import type { RuntimeAdapter } from './runtime/runtime-adapter.js';
 
 export type RunnerServer = Readonly<{
@@ -15,19 +17,28 @@ export type RunnerServer = Readonly<{
 export async function startRunnerServer(input: {
   port: number;
   databasePath?: string;
+  allowedRoots?: readonly string[];
   runtime: RuntimeAdapter;
   now?: () => string;
   createId?: (prefix: string) => string;
 }): Promise<RunnerServer> {
   const database = createDatabase({ filename: input.databasePath ?? ':memory:' });
   const repositories = createRepositories(database);
+  const now = input.now ?? (() => new Date().toISOString());
+  const createId = input.createId ?? ((prefix: string) => `${prefix}-${randomUUID()}`);
   const events = createEventStreamBroker();
   const orchestrator = createSessionOrchestrator({
     repositories,
     runtime: input.runtime,
-    now: input.now,
-    createId: input.createId,
+    now,
+    createId,
     onEvent: (record) => events.publish(record)
+  });
+  const workdirCatalog = createWorkdirCatalog({
+    repositories,
+    allowedRoots: input.allowedRoots ?? [],
+    now,
+    createId,
   });
   await recoverPersistedSessions(orchestrator, repositories.sessions.listActive());
 
@@ -45,6 +56,29 @@ export async function startRunnerServer(input: {
         const body = await readJsonBody<Parameters<typeof orchestrator.createSession>[0]>(request);
         const session = await orchestrator.createSession(body);
         writeJson(response, 201, session);
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/workdirs') {
+        writeJson(response, 200, workdirCatalog.listSavedWorkdirs());
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/workdirs/scan') {
+        const offset = Number(url.searchParams.get('offset') ?? '0');
+        const limit = Number(url.searchParams.get('limit') ?? '25');
+        const result = await workdirCatalog.scanWorkdirs({
+          offset: Number.isNaN(offset) ? 0 : offset,
+          limit: Number.isNaN(limit) ? 25 : limit,
+        });
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === 'POST' && path === '/workdirs') {
+        const body = await readJsonBody<{ path: string; displayName?: string; createdBy: string }>(request);
+        const saved = await workdirCatalog.saveWorkdir(body);
+        writeJson(response, 201, saved);
         return;
       }
 
@@ -212,6 +246,15 @@ function writeError(response: ServerResponse<IncomingMessage>, error: unknown): 
 
   if (message.startsWith('stale prompt ')) {
     writeJson(response, 409, { error: 'stale_prompt', message });
+    return;
+  }
+
+  if (
+    message === 'Path is outside the allowed roots.' ||
+    message.startsWith('workdir path does not exist: ') ||
+    message.startsWith('workdir path is not a directory: ')
+  ) {
+    writeJson(response, 400, { error: 'invalid_request', message });
     return;
   }
 

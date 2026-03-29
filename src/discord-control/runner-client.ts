@@ -1,5 +1,13 @@
 import type { ActivePromptModel } from './render-model.js';
 import type { RuntimeEvent } from '../shared/domain/events.js';
+import type {
+  RunnerWorkdirListResponse,
+  RunnerWorkdirSaveRequest,
+  RunnerWorkdirScanCandidate,
+  RunnerWorkdirScanRequest,
+  RunnerWorkdirScanResponse,
+  RunnerWorkdirView
+} from '../shared/contracts/runner-api.js';
 import type { SessionContext, SessionState } from '../shared/domain/session.js';
 
 export type RunnerEventEnvelope = Readonly<{
@@ -24,6 +32,9 @@ export type RunnerClient = Readonly<{
   }): AsyncIterable<RunnerEventEnvelope>;
   health(): Promise<{ ok: boolean }>;
   getPendingPrompt(input: { sessionId: string }): Promise<ActivePromptModel | null>;
+  listWorkdirs?: () => Promise<RunnerWorkdirListResponse>;
+  scanWorkdirs?: (input: RunnerWorkdirScanRequest) => Promise<RunnerWorkdirScanResponse>;
+  saveWorkdir?: (input: RunnerWorkdirSaveRequest) => Promise<RunnerWorkdirView>;
 }>;
 
 export type RunnerControlClient = RunnerClient & Readonly<{
@@ -36,6 +47,10 @@ export type RunnerControlClient = RunnerClient & Readonly<{
   answerQuestion(input: { promptId: string; answer: string }): Promise<void>;
   getSession(input: { sessionId: string }): Promise<RunnerSessionView>;
 }>; 
+
+type RunnerWorkdirScanResult = RunnerWorkdirScanResponse & Readonly<{
+  items: readonly RunnerWorkdirScanCandidate[];
+}>;
 
 export function createHttpRunnerClient(input: {
   origin: string;
@@ -135,6 +150,33 @@ export function createHttpRunnerClient(input: {
     async health() {
       const response = await fetchImpl(`${origin}/health`);
       return await readJson<{ ok: boolean }>(response);
+    },
+    async listWorkdirs() {
+      const response = await fetchImpl(`${origin}/workdirs`);
+      return await readJson<RunnerWorkdirListResponse>(response);
+    },
+    async scanWorkdirs(inputValue: RunnerWorkdirScanRequest) {
+      const searchParams = new URLSearchParams();
+      if (inputValue.offset !== undefined) {
+        searchParams.set('offset', String(inputValue.offset));
+      }
+
+      if (inputValue.limit !== undefined) {
+        searchParams.set('limit', String(inputValue.limit));
+      }
+
+      const query = searchParams.toString();
+      const response = await fetchImpl(`${origin}/workdirs/scan${query.length > 0 ? `?${query}` : ''}`);
+      return await readJson<RunnerWorkdirScanResult>(response);
+    },
+    async saveWorkdir(body: RunnerWorkdirSaveRequest) {
+      const response = await fetchImpl(`${origin}/workdirs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      return await readJson<RunnerWorkdirView>(response);
     },
     async getPendingPrompt(inputValue) {
       return (await getSession(inputValue.sessionId)).pendingPrompt;

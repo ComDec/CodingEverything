@@ -56,5 +56,18 @@ export const CORE_SCHEMA = [
       metadata_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS workdirs (
+      id TEXT PRIMARY KEY,
+      path TEXT NOT NULL UNIQUE,
+      display_name TEXT,
+      source TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      use_count INTEGER NOT NULL
+    )
   `
 ] as const;

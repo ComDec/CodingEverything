@@ -49,6 +49,10 @@ export function parseAppConfig(
 
 export const parseConfig = parseAppConfig;
 
+export function parseAllowedRootsValue(value: string | undefined): string[] {
+  return splitCsv(value ?? '');
+}
+
 export function getSessionManagerAllowlistWarning(config: Pick<AppConfig, 'sessionManagerUserIds' | 'sessionManagerRoleIds'>): string | null {
   if (config.sessionManagerUserIds.length > 0 || config.sessionManagerRoleIds.length > 0) {
     return null;
