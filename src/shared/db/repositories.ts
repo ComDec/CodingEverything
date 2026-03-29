@@ -55,6 +55,20 @@ export type AuditRecord = Readonly<{
   createdAt: string;
 }>;
 
+export type WorkdirSource = 'scan';
+
+export type WorkdirRecord = Readonly<{
+  id: string;
+  path: string;
+  displayName: string | null;
+  source: WorkdirSource;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string;
+  useCount: number;
+}>;
+
 export function createRepositories(database: Database) {
   return {
     sessions: {
@@ -583,9 +597,112 @@ export function createRepositories(database: Database) {
           ...auditEntry
         };
       }
+    },
+    workdirs: {
+      upsert(record: WorkdirRecord): void {
+        database
+          .prepare(
+            `
+              INSERT INTO workdirs (
+                id,
+                path,
+                display_name,
+                source,
+                created_by,
+                created_at,
+                updated_at,
+                last_used_at,
+                use_count
+              )
+              VALUES (
+                @id,
+                @path,
+                @displayName,
+                @source,
+                @createdBy,
+                @createdAt,
+                @updatedAt,
+                @lastUsedAt,
+                @useCount
+              )
+              ON CONFLICT(path) DO UPDATE SET
+                display_name = COALESCE(excluded.display_name, workdirs.display_name),
+                source = excluded.source,
+                updated_at = excluded.updated_at,
+                last_used_at = excluded.last_used_at,
+                use_count = excluded.use_count
+            `
+          )
+          .run(record);
+      },
+      markUsed(input: { id: string; lastUsedAt: string; updatedAt: string }): void {
+        database
+          .prepare(
+            `
+              UPDATE workdirs
+              SET last_used_at = @lastUsedAt,
+                  updated_at = @updatedAt,
+                  use_count = use_count + 1
+              WHERE id = @id
+            `
+          )
+          .run(input);
+      },
+      getById(id: string): WorkdirRecord | null {
+        const row = getWorkdirRowById(database, id);
+
+        if (!row) {
+          return null;
+        }
+
+        return mapWorkdirRow(row);
+      },
+      getByPath(path: string): WorkdirRecord | null {
+        const row = getWorkdirRowByPath(database, path);
+
+        if (!row) {
+          return null;
+        }
+
+        return mapWorkdirRow(row);
+      },
+      listRecent(): WorkdirRecord[] {
+        const rows = database
+          .prepare(
+            `
+              SELECT
+                id,
+                path,
+                display_name,
+                source,
+                created_by,
+                created_at,
+                updated_at,
+                last_used_at,
+                use_count
+              FROM workdirs
+              ORDER BY last_used_at DESC, display_name ASC
+            `
+          )
+          .all() as WorkdirRow[];
+
+        return rows.map(mapWorkdirRow);
+      }
     }
   };
 }
+
+type WorkdirRow = {
+  id: string;
+  path: string;
+  display_name: string | null;
+  source: WorkdirSource;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string;
+  use_count: number;
+};
 
 function insertPrompt(
   database: Database,
@@ -617,4 +734,42 @@ function insertPrompt(
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function getWorkdirRowById(database: Database, id: string): WorkdirRow | undefined {
+  return database
+    .prepare(
+      `
+        SELECT id, path, display_name, source, created_by, created_at, updated_at, last_used_at, use_count
+        FROM workdirs
+        WHERE id = ?
+      `
+    )
+    .get(id) as WorkdirRow | undefined;
+}
+
+function getWorkdirRowByPath(database: Database, path: string): WorkdirRow | undefined {
+  return database
+    .prepare(
+      `
+        SELECT id, path, display_name, source, created_by, created_at, updated_at, last_used_at, use_count
+        FROM workdirs
+        WHERE path = ?
+      `
+    )
+    .get(path) as WorkdirRow | undefined;
+}
+
+function mapWorkdirRow(row: WorkdirRow): WorkdirRecord {
+  return {
+    id: row.id,
+    path: row.path,
+    displayName: row.display_name,
+    source: row.source,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastUsedAt: row.last_used_at,
+    useCount: row.use_count
+  };
 }

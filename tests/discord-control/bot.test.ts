@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createDiscordControlBot } from '../../src/discord-control/bot.js';
+import { createDiscordControlBot, listDiscordCommandDefinitions } from '../../src/discord-control/bot.js';
 import { createCommandHandlers } from '../../src/discord-control/command-handlers.js';
 import type { RunnerEventEnvelope } from '../../src/discord-control/runner-client.js';
 
@@ -62,7 +62,7 @@ describe('discord control bot', () => {
         async getSession() {
           return { sessionId: 'session-1', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
         }
-      },
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
       bindings: {
         getByThreadId() {
           return null;
@@ -679,6 +679,2547 @@ describe('discord control bot', () => {
     ]);
   });
 
+  it('shows a picker-first session-new wizard when cwd is omitted', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({ channelId: input.channelId, userId: input.context.createdBy });
+          return { sessionId: 'session-wizard' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-wizard');
+    const channel = createFakeChannel(thread);
+    const interaction = createCreateSessionInteraction(channel, {
+      values: { cwd: null, model: 'haiku', effort: 'high', skills: 'git,notes' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() {
+          return null;
+        },
+        async listEvents() {
+          return [];
+        },
+        subscribeEvents({ abortSignal }) {
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise<void>((resolve) => {
+                if (abortSignal?.aborted) {
+                  resolve();
+                  return;
+                }
+
+                abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+              });
+            }
+          };
+        },
+        async health() {
+          return { ok: true };
+        },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-wizard', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: {
+        getByThreadId() {
+          return null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    expect(createSessionCalls).toEqual([]);
+    expect(channel.createdThreadNames).toEqual([]);
+    expect(interaction.replies).toEqual([
+      expect.objectContaining({
+        ephemeral: true,
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Choose how to pick a working directory before choosing model, effort, and skills.'
+          })
+        ]
+      })
+    ]);
+    expect(collectButtonLabels(interaction.replies[0]?.components ?? [])).toEqual(['Use history', 'Search new', 'Manual input']);
+  });
+
+  it('opens manual cwd input and then shows session options with defaults', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-manual-wizard' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-manual-wizard'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-manual-wizard',
+      values: { cwd: null }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-manual-wizard', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const manualButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[2] ?? '');
+    await events.emit('interactionCreate', manualButton);
+
+    expect(manualButton.replies).toEqual([]);
+    expect(manualButton.updates).toEqual([]);
+    expect(manualButton.modals).toEqual([
+      expect.objectContaining({
+        custom_id: expect.stringMatching(/^session-new:modal:manual:[^:]+$/),
+        title: 'Enter workdir path'
+      })
+    ]);
+
+    const modalInteraction = createModalSubmitInteraction(
+      String(manualButton.modals[0]?.custom_id ?? ''),
+      { cwd: '/workspace/manual-app' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    expect(modalInteraction.replies).toEqual([
+      {
+        ephemeral: true,
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Review session options before creating the new session.\nworkdir: /workspace/manual-app\nmodel: sonnet\neffort: default\nskills: none'
+          })
+        ],
+        components: expect.any(Array)
+      }
+    ]);
+    expect(collectButtonLabels(modalInteraction.replies[0]?.components ?? [])).toEqual(['Model', 'Effort', 'Skills', 'Create session']);
+  });
+
+  it('lets the user customize model, effort, and skills before creating the session', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{
+      channelId: string;
+      userId: string;
+      cwd: string;
+      model: string;
+      effort?: string;
+      skills: readonly string[];
+    }> = [];
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd,
+            model: input.context.model,
+            effort: input.context.runtimeOptions.effort,
+            skills: input.context.runtimeOptions.skills ?? [],
+          });
+          return { sessionId: 'session-custom-options' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-custom-options'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-custom-options',
+      values: { cwd: null }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-custom-options', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const manualButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[2] ?? '');
+    await events.emit('interactionCreate', manualButton);
+
+    const cwdModal = createModalSubmitInteraction(String(manualButton.modals[0]?.custom_id ?? ''), { cwd: '/workspace/custom-options-app' });
+    await events.emit('interactionCreate', cwdModal);
+
+    const modelButton = createButtonInteraction(findButtonCustomIdByLabel(cwdModal.replies[0]?.components ?? [], 'Model') ?? '');
+    await events.emit('interactionCreate', modelButton);
+    const modelSelect = createStringSelectInteraction(
+      collectStringSelectCustomIds(modelButton.updates[0]?.components ?? [])[0] ?? '',
+      ['opus']
+    );
+    await events.emit('interactionCreate', modelSelect);
+
+    const effortButton = createButtonInteraction(findButtonCustomIdByLabel(modelSelect.updates[0]?.components ?? [], 'Effort') ?? '');
+    await events.emit('interactionCreate', effortButton);
+    const effortSelect = createStringSelectInteraction(
+      collectStringSelectCustomIds(effortButton.updates[0]?.components ?? [])[0] ?? '',
+      ['max']
+    );
+    await events.emit('interactionCreate', effortSelect);
+
+    const skillsButton = createButtonInteraction(findButtonCustomIdByLabel(effortSelect.updates[0]?.components ?? [], 'Skills') ?? '');
+    await events.emit('interactionCreate', skillsButton);
+    const skillsModal = createModalSubmitInteraction(String(skillsButton.modals[0]?.custom_id ?? ''), { skills: 'git, notes' });
+    await events.emit('interactionCreate', skillsModal);
+
+    const createButton = createButtonInteraction(findButtonCustomIdByLabel(skillsModal.replies[0]?.components ?? [], 'Create session') ?? '');
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/custom-options-app', displayName: 'custom-options-app', createdBy: 'discord-user-1' }
+    ]);
+    expect(createSessionCalls).toEqual([
+      {
+        channelId: 'thread-custom-options',
+        userId: 'discord-user-1',
+        cwd: '/workspace/custom-options-app',
+        model: 'opus',
+        effort: 'max',
+        skills: ['git', 'notes']
+      }
+    ]);
+  });
+
+  it('keeps session-new compatible with direct creation when cwd is supplied', async () => {
+    expect(listDiscordCommandDefinitions()).toContainEqual(
+      expect.objectContaining({
+        name: 'session-new',
+        options: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'cwd',
+            required: false
+          })
+        ])
+      })
+    );
+
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-compat' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-compat');
+    const channel = createFakeChannel(thread);
+    const interaction = createCreateSessionInteraction(channel, {
+      values: { cwd: '/workspace/compat', model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() {
+          return null;
+        },
+        async listEvents() {
+          return [];
+        },
+        subscribeEvents({ abortSignal }) {
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise<void>((resolve) => {
+                if (abortSignal?.aborted) {
+                  resolve();
+                  return;
+                }
+
+                abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+              });
+            }
+          };
+        },
+        async health() {
+          return { ok: true };
+        },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-compat', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: {
+        getByThreadId() {
+          return null;
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    expect(createSessionCalls).toEqual([
+      { channelId: 'thread-compat', userId: 'discord-user-1', cwd: '/workspace/compat' }
+    ]);
+    expect(channel.createdThreadNames).toEqual(['pretty-fire']);
+    expect(interaction.replies).toEqual([
+      {
+        content: 'Session session-compat created in thread thread-compat.',
+        ephemeral: true
+      }
+    ]);
+  });
+
+  it('loads saved workdirs for the session-new history picker and paginates results', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-history'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history',
+      values: { cwd: null, model: 'haiku', effort: 'high', skills: 'git,notes' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return Array.from({ length: 26 }, (_, index) => ({
+            id: `workdir-${index + 1}`,
+            path: `/workspace/history-${index + 1}`,
+            displayName: `History ${index + 1}`,
+            source: 'scan' as const,
+            createdBy: 'discord-user-1',
+            createdAt: '2026-03-25T00:00:00.000Z',
+            updatedAt: '2026-03-25T00:00:00.000Z',
+            lastUsedAt: '2026-03-25T00:00:00.000Z',
+            useCount: 1
+          }));
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(extractEmbedDescriptions(buttonInteraction.updates[0]?.embeds ?? [])).toEqual([
+      'Choose a saved working directory for the new session.'
+    ]);
+    expect(collectStringSelectCustomIds(buttonInteraction.updates[0]?.components ?? [])).toEqual([
+      expect.stringMatching(/^session-new:select:history:[^:]+$/)
+    ]);
+    expect(collectStringSelectOptionLabels(buttonInteraction.updates[0]?.components ?? [])).toEqual(
+      Array.from({ length: 25 }, (_, index) => `History ${index + 1}`)
+    );
+    expect(collectButtonLabels(buttonInteraction.updates[0]?.components ?? [])).toEqual(['Back', 'Next']);
+
+    const nextPageInteraction = createButtonInteraction(
+      findButtonCustomIdByLabel(buttonInteraction.updates[0]?.components ?? [], 'Next') ?? ''
+    );
+    await events.emit('interactionCreate', nextPageInteraction);
+
+    expect(collectStringSelectOptionLabels(nextPageInteraction.updates[0]?.components ?? [])).toEqual(['History 26']);
+    expect(collectButtonLabels(nextPageInteraction.updates[0]?.components ?? [])).toEqual(['Back', 'Previous']);
+
+    const previousPageInteraction = createButtonInteraction(
+      findButtonCustomIdByLabel(nextPageInteraction.updates[0]?.components ?? [], 'Previous') ?? ''
+    );
+    await events.emit('interactionCreate', previousPageInteraction);
+
+    expect(collectStringSelectOptionLabels(previousPageInteraction.updates[0]?.components ?? [])).toEqual(
+      Array.from({ length: 25 }, (_, index) => `History ${index + 1}`)
+    );
+    expect(collectButtonLabels(previousPageInteraction.updates[0]?.components ?? [])).toEqual(['Back', 'Next']);
+  });
+
+  it('lets the user go back from the history picker to the source picker', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history-back' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const interaction = createCreateSessionInteraction(undefined, {
+      channelId: 'channel-history-back',
+      values: { cwd: null }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [{
+            id: 'history-1',
+            path: '/workspace/history-1',
+            displayName: 'History 1',
+            source: 'scan' as const,
+            createdBy: 'discord-user-1',
+            createdAt: '2026-03-25T00:00:00.000Z',
+            updatedAt: '2026-03-25T00:00:00.000Z',
+            lastUsedAt: '2026-03-25T00:00:00.000Z',
+            useCount: 1
+          }];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-back', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as Parameters<typeof createDiscordControlBot>[0]['runnerClient'],
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    const historyButton = createButtonInteraction(findButtonCustomIdByLabel(interaction.replies[0]?.components ?? [], 'Use history') ?? '');
+    await events.emit('interactionCreate', historyButton);
+
+    const backButton = createButtonInteraction(findButtonCustomIdByLabel(historyButton.updates[0]?.components ?? [], 'Back') ?? '');
+    await events.emit('interactionCreate', backButton);
+
+    expect(collectButtonLabels(backButton.updates[0]?.components ?? [])).toEqual(['Use history', 'Search new', 'Manual input']);
+  });
+
+  it('shows a short message when session-new history is unavailable', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history-unavailable' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-history-unavailable'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-unavailable',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-unavailable', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(buttonInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Saved workdir history is unavailable right now.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('shows the same short message when session-new history loading rejects', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history-rejected' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-history-rejected'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-rejected',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          throw new Error('not supported');
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-rejected', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(buttonInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Saved workdir history is unavailable right now.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('shows a short message when session-new history is empty', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history-empty' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-history-empty'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-empty',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-empty', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(buttonInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'No saved workdirs are available yet.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('loads paginated scan results for the session-new scan picker and stores the selected path', async () => {
+    const events = createEventBus();
+    const scanCalls: Array<{ offset?: number; limit?: number }> = [];
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-search' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-search'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-search',
+      values: { cwd: null, model: 'opus', skills: 'review' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async scanWorkdirs(input: { offset?: number; limit?: number }) {
+          scanCalls.push(input);
+          const offset = input.offset ?? 0;
+
+          if (offset === 0) {
+            return {
+              items: Array.from({ length: 25 }, (_, index) => ({
+                path: `/workspace/scan-${index + 1}`,
+                displayName: `Scan ${index + 1}`,
+                score: 100 - index,
+              })),
+              nextOffset: 25
+            };
+          }
+
+          return {
+            items: [
+              {
+                path: '/workspace/scan-26',
+                displayName: 'Scan 26',
+                score: 74
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return createSavedWorkdirResult(input);
+        },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-search', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const searchButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', searchButton);
+
+    expect(scanCalls).toEqual([{ offset: 0, limit: 25 }]);
+    expect(extractEmbedDescriptions(searchButton.updates[0]?.embeds ?? [])).toEqual([
+      'Choose a newly discovered working directory for the new session.'
+    ]);
+    expect(collectStringSelectOptionLabels(searchButton.updates[0]?.components ?? [])).toEqual(
+      Array.from({ length: 25 }, (_, index) => `Scan ${index + 1}`)
+    );
+    expect(collectButtonLabels(searchButton.updates[0]?.components ?? [])).toEqual(['Back', 'Next']);
+
+    const nextPageButton = createButtonInteraction(
+      findButtonCustomIdByLabel(searchButton.updates[0]?.components ?? [], 'Next') ?? ''
+    );
+    await events.emit('interactionCreate', nextPageButton);
+
+    expect(scanCalls).toEqual([
+      { offset: 0, limit: 25 },
+      { offset: 25, limit: 25 }
+    ]);
+    expect(collectStringSelectOptionLabels(nextPageButton.updates[0]?.components ?? [])).toEqual(['Scan 26']);
+    expect(collectButtonLabels(nextPageButton.updates[0]?.components ?? [])).toEqual(['Back', 'Previous']);
+
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(nextPageButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(nextPageButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    expect(selectInteraction.modals).toEqual([
+      {
+        custom_id: expect.stringMatching(/^session-new:modal:rename:[^:]+$/),
+        title: 'Rename workdir',
+        components: expect.any(Array)
+      }
+    ]);
+
+    const modalInteraction = createModalSubmitInteraction(
+      String(selectInteraction.modals[0]?.custom_id ?? ''),
+      { displayName: 'Scan 26 Saved' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(modalInteraction.replies[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/scan-26', displayName: 'Scan 26 Saved', createdBy: 'discord-user-1' }
+    ]);
+    expect(createSessionCalls).toEqual([
+      { channelId: 'thread-search', userId: 'discord-user-1', cwd: '/workspace/scan-26' }
+    ]);
+  });
+
+  it('lets the user go back from the scan picker to the source picker', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-scan-back' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const interaction = createCreateSessionInteraction(undefined, {
+      channelId: 'channel-scan-back',
+      values: { cwd: null }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async scanWorkdirs() {
+          return {
+            items: [{ path: '/workspace/scan-1', displayName: 'Scan 1', score: 100 }],
+            nextOffset: null
+          };
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-scan-back', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', interaction);
+
+    const searchButton = createButtonInteraction(findButtonCustomIdByLabel(interaction.replies[0]?.components ?? [], 'Search new') ?? '');
+    await events.emit('interactionCreate', searchButton);
+
+    const backButton = createButtonInteraction(findButtonCustomIdByLabel(searchButton.updates[0]?.components ?? [], 'Back') ?? '');
+    await events.emit('interactionCreate', backButton);
+
+    expect(collectButtonLabels(backButton.updates[0]?.components ?? [])).toEqual(['Use history', 'Search new', 'Manual input']);
+  });
+
+  it('opens a rename modal and defaults blank rename submissions to the scanned path basename', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-rename-default' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-rename-default');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-rename-default',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [];
+        },
+        async scanWorkdirs() {
+          return {
+            items: [
+              {
+                path: '/workspace/projects/renamed-app',
+                displayName: 'Scanned App',
+                score: 100
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-rename-default', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const searchButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', searchButton);
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(searchButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(searchButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    expect(selectInteraction.modals).toEqual([
+      expect.objectContaining({
+        custom_id: expect.stringMatching(/^session-new:modal:rename:[^:]+$/),
+        title: 'Rename workdir'
+      })
+    ]);
+
+    const modalInteraction = createModalSubmitInteraction(
+      String(selectInteraction.modals[0]?.custom_id ?? ''),
+      { displayName: '   ' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    expect(saveWorkdirCalls).toEqual([]);
+    expect(createSessionCalls).toEqual([]);
+    expect(modalInteraction.replies).toEqual([
+      {
+        ephemeral: true,
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Review session options before creating the new session.\nworkdir: /workspace/projects/renamed-app\nmodel: haiku\neffort: default\nskills: none'
+          })
+        ],
+        components: expect.any(Array)
+      }
+    ]);
+    expect(collectButtonLabels(modalInteraction.replies[0]?.components ?? [])).toEqual(['Model', 'Effort', 'Skills', 'Create session']);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(modalInteraction.replies[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/projects/renamed-app', displayName: 'renamed-app', createdBy: 'discord-user-1' }
+    ]);
+    expect(createSessionCalls).toEqual([
+      { channelId: 'thread-rename-default', userId: 'discord-user-1', cwd: '/workspace/projects/renamed-app' }
+    ]);
+  });
+
+  it('uses the submitted rename when the scan rename modal has a custom name', async () => {
+    const events = createEventBus();
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-rename-custom' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-rename-custom'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-rename-custom',
+      values: { cwd: null, model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [];
+        },
+        async scanWorkdirs() {
+          return {
+            items: [
+              {
+                path: '/workspace/projects/custom-app',
+                displayName: 'Custom App',
+                score: 100
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-rename-custom', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const searchButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', searchButton);
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(searchButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(searchButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+    const modalInteraction = createModalSubmitInteraction(
+      String(selectInteraction.modals[0]?.custom_id ?? ''),
+      { displayName: 'Team Favorite' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(modalInteraction.replies[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/projects/custom-app', displayName: 'Team Favorite', createdBy: 'discord-user-1' }
+    ]);
+  });
+
+  it('preserves an existing custom rename when the scan rename modal is submitted blank', async () => {
+    const events = createEventBus();
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-rename-preserve' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-rename-preserve'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-rename-preserve',
+      values: { cwd: null, model: 'opus' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'saved-custom-app',
+              path: '/workspace/projects/custom-preserved',
+              displayName: 'Existing Custom Name',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 2
+            }
+          ];
+        },
+        async scanWorkdirs() {
+          return {
+            items: [
+              {
+                path: '/workspace/projects/custom-preserved',
+                displayName: 'Scanner Label',
+                score: 100
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-rename-preserve', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const searchButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', searchButton);
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(searchButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(searchButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+    const modalInteraction = createModalSubmitInteraction(
+      String(selectInteraction.modals[0]?.custom_id ?? ''),
+      { displayName: '   ' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(modalInteraction.replies[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/projects/custom-preserved', displayName: 'Existing Custom Name', createdBy: 'discord-user-1' }
+    ]);
+  });
+
+  it('shows a short message when saving after a scan rename fails', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-rename-save-fail' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-rename-save-fail'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-rename-save-fail',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [];
+        },
+        async scanWorkdirs() {
+          return {
+            items: [
+              {
+                path: '/workspace/projects/fail-save',
+                displayName: 'Fail Save',
+                score: 100
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async saveWorkdir() {
+          throw new Error('database unavailable');
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-rename-save-fail', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const searchButton = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', searchButton);
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(searchButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(searchButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+    const modalInteraction = createModalSubmitInteraction(
+      String(selectInteraction.modals[0]?.custom_id ?? ''),
+      { displayName: 'Whatever' }
+    );
+    await events.emit('interactionCreate', modalInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(modalInteraction.replies[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(createSessionCalls).toEqual([]);
+    expect(createButton.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Saved workdir is unavailable right now. Please choose another directory.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('shows a short message when session-new scan finds no candidates', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-scan-empty' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-scan-empty'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-scan-empty',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async scanWorkdirs() {
+          return { items: [], nextOffset: null };
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-scan-empty', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(buttonInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'No new working directories were found.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('shows a short message when session-new scan is unavailable', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-scan-unavailable' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-scan-unavailable'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-scan-unavailable',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-scan-unavailable', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    expect(buttonInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Directory search is unavailable right now.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('keeps separate session-new wizard instances for repeated launches in the same channel', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-repeat' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-repeat'));
+    const firstSlash = createCreateSessionInteraction(channel, {
+      channelId: 'channel-repeat',
+      values: { cwd: null, model: 'haiku', skills: 'git' }
+    });
+    const secondSlash = createCreateSessionInteraction(channel, {
+      channelId: 'channel-repeat',
+      values: { cwd: null, model: 'opus', skills: 'review' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async scanWorkdirs() {
+          return {
+            items: [
+              {
+                path: '/workspace/repeat-search',
+                displayName: 'Repeat Search',
+                score: 100
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-repeat', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', firstSlash);
+    await events.emit('interactionCreate', secondSlash);
+
+    const firstIds = collectButtonCustomIds(firstSlash.replies[0]?.components ?? []);
+    const secondIds = collectButtonCustomIds(secondSlash.replies[0]?.components ?? []);
+    expect(firstIds).toHaveLength(3);
+    expect(secondIds).toHaveLength(3);
+    expect(firstIds).not.toEqual(secondIds);
+
+    const firstButton = createButtonInteraction(firstIds[0] ?? '');
+    const secondButton = createButtonInteraction(secondIds[1] ?? '');
+
+    await events.emit('interactionCreate', firstButton);
+    await events.emit('interactionCreate', secondButton);
+
+    expect(firstButton.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Saved workdir history is unavailable right now.'
+          })
+        ],
+        components: []
+      }
+    ]);
+    expect(secondButton.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Choose a newly discovered working directory for the new session.'
+          })
+        ],
+        components: expect.any(Array)
+      }
+    ]);
+  });
+
+  it('rejects stale session-new scan selections after the picker page changes', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-scan-stale' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-scan-stale'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-scan-stale',
+      values: { cwd: null, model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async scanWorkdirs(input: { offset?: number; limit?: number }) {
+          if ((input.offset ?? 0) === 0) {
+            return {
+              items: Array.from({ length: 25 }, (_, index) => ({
+                path: `/workspace/stale-${index + 1}`,
+                displayName: `Stale ${index + 1}`,
+                score: 100 - index,
+              })),
+              nextOffset: 25
+            };
+          }
+
+          return {
+            items: [
+              {
+                path: '/workspace/stale-26',
+                displayName: 'Stale 26',
+                score: 74
+              }
+            ],
+            nextOffset: null
+          };
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-scan-stale', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const searchButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[1] ?? '';
+    const firstPageButton = createButtonInteraction(searchButtonId);
+    await events.emit('interactionCreate', firstPageButton);
+
+    const staleSelect = createStringSelectInteraction(
+      collectStringSelectCustomIds(firstPageButton.updates[0]?.components ?? [])[0] ?? '',
+      [collectStringSelectOptionValues(firstPageButton.updates[0]?.components ?? [])[0] ?? '']
+    );
+    const nextPageButton = createButtonInteraction(
+      findButtonCustomIdByLabel(firstPageButton.updates[0]?.components ?? [], 'Next') ?? ''
+    );
+    await events.emit('interactionCreate', nextPageButton);
+    await events.emit('interactionCreate', staleSelect);
+
+    expect(staleSelect.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Session setup expired. Please run /session-new again.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('returns a stale-safe message after a session-new wizard button has already been used', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-stale' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-stale'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-stale',
+      values: { cwd: null, model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-stale', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const buttonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const firstButton = createButtonInteraction(buttonId);
+    const staleButton = createButtonInteraction(buttonId);
+
+    await events.emit('interactionCreate', firstButton);
+    await events.emit('interactionCreate', staleButton);
+
+    expect(firstButton.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Saved workdir history is unavailable right now.'
+          })
+        ],
+        components: []
+      }
+    ]);
+    expect(staleButton.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Session setup expired. Please run /session-new again.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
+  it('rejects foreign-user history interactions without mutating the initiator picker state', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-foreign-button' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-foreign-button');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-foreign-button',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-foreign',
+              path: '/workspace/initiator-app',
+              displayName: 'Initiator App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-foreign-button', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const initiatorButton = createButtonInteraction(historyButtonId, 'discord-user-1');
+    await events.emit('interactionCreate', initiatorButton);
+
+    const initialPickerComponents = initiatorButton.updates[0]?.components ?? [];
+    const initialPickerLabels = collectStringSelectOptionLabels(initialPickerComponents);
+    const initialPickerButtons = collectButtonLabels(initialPickerComponents);
+    const foreignButton = createButtonInteraction(historyButtonId, 'discord-user-2');
+
+    await events.emit('interactionCreate', foreignButton);
+
+    expect(foreignButton.replies).toEqual([
+      {
+        ephemeral: true,
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Only the user who started this session setup can use it.'
+          })
+        ],
+        components: []
+      }
+    ]);
+    expect(foreignButton.updates).toEqual([]);
+    expect(collectStringSelectOptionLabels(initiatorButton.updates[0]?.components ?? [])).toEqual(initialPickerLabels);
+    expect(collectButtonLabels(initiatorButton.updates[0]?.components ?? [])).toEqual(initialPickerButtons);
+
+    const selectId = collectStringSelectCustomIds(initiatorButton.updates[0]?.components ?? [])[0] ?? '';
+    const foreignSelect = createStringSelectInteraction(selectId, ['workdir-foreign'], 'discord-user-2');
+    const initiatorSelect = createStringSelectInteraction(selectId, ['workdir-foreign'], 'discord-user-1');
+
+    await events.emit('interactionCreate', foreignSelect);
+    await events.emit('interactionCreate', initiatorSelect);
+
+    expect(foreignSelect.replies).toEqual([
+      {
+        ephemeral: true,
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Only the user who started this session setup can use it.'
+          })
+        ],
+        components: []
+      }
+    ]);
+    expect(foreignSelect.updates).toEqual([]);
+    expect(createSessionCalls).toEqual([]);
+    expect(thread.sentMessages).toEqual([]);
+  });
+
+  it('creates a session from a selected history item', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const saveWorkdirCalls: Array<{ path: string; displayName?: string; createdBy: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-workdir-select' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-workdir-select');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-workdir-select',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-history-app',
+              path: '/workspace/history-app',
+              displayName: 'History App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          saveWorkdirCalls.push(input);
+          return {
+            id: 'workdir-history-app',
+            path: input.path,
+            displayName: input.displayName ?? null,
+            source: 'scan' as const,
+            createdBy: input.createdBy,
+            createdAt: '2026-03-25T00:00:00.000Z',
+            updatedAt: '2026-03-25T00:00:00.000Z',
+            lastUsedAt: '2026-03-25T00:00:00.000Z',
+            useCount: 2
+          };
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-workdir-select', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      random: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0)
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const historyButton = createButtonInteraction(historyButtonId);
+    await events.emit('interactionCreate', historyButton);
+
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(historyButton.updates[0]?.components ?? [])[0] ?? '',
+      ['workdir-history-app']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    expect(saveWorkdirCalls).toEqual([]);
+    expect(createSessionCalls).toEqual([]);
+    expect(selectInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Review session options before creating the new session.\nworkdir: /workspace/history-app\nmodel: haiku\neffort: default\nskills: none'
+          })
+        ],
+        components: expect.any(Array)
+      }
+    ]);
+    expect(collectButtonLabels(selectInteraction.updates[0]?.components ?? [])).toEqual(['Model', 'Effort', 'Skills', 'Create session']);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(selectInteraction.updates[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(saveWorkdirCalls).toEqual([
+      { path: '/workspace/history-app', displayName: 'History App', createdBy: 'discord-user-1' }
+    ]);
+    expect(createSessionCalls).toEqual([
+      { channelId: 'thread-workdir-select', userId: 'discord-user-1', cwd: '/workspace/history-app' }
+    ]);
+    expect(channel.createdThreadNames).toEqual(['pretty-fire']);
+    expect(thread.sentMessages).toEqual([
+      expect.objectContaining({
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Session session-workdir-select\nname: pretty-fire\ncwd: /workspace/history-app\nmodel: haiku\neffort: default\nskills: none'
+          })
+        ]
+      })
+    ]);
+  });
+
+  it('does not create a session when refreshing saved history recency fails', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-history-best-effort' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-history-best-effort');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-best-effort',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-best-effort',
+              path: '/workspace/best-effort-app',
+              displayName: 'Best Effort App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir() {
+          throw new Error('database temporarily unavailable');
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-best-effort', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const historyButton = createButtonInteraction(historyButtonId);
+    await events.emit('interactionCreate', historyButton);
+
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(historyButton.updates[0]?.components ?? [])[0] ?? '',
+      ['workdir-best-effort']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(selectInteraction.updates[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(createSessionCalls).toEqual([]);
+    expect(channel.createdThreadNames).toEqual([]);
+    expect(thread.sentMessages).toEqual([]);
+    expect(extractEmbedDescriptions(createButton.updates[0]?.embeds ?? [])).toEqual([
+      'Saved workdir is unavailable right now. Please choose another directory.'
+    ]);
+    expect(collectButtonLabels(createButton.updates[0]?.components ?? [])).toEqual([]);
+  });
+
+  it('does not create a session when history refresh is unavailable', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-history-missing-refresh' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-history-missing');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-missing',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: ({
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-missing-refresh',
+              path: '/workspace/missing-refresh-app',
+              displayName: 'Missing Refresh App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-missing-refresh', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      } as unknown as Parameters<typeof createDiscordControlBot>[0]['runnerClient']),
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const historyButton = createButtonInteraction(historyButtonId);
+    await events.emit('interactionCreate', historyButton);
+
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(historyButton.updates[0]?.components ?? [])[0] ?? '',
+      ['workdir-missing-refresh']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(selectInteraction.updates[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(createSessionCalls).toEqual([]);
+    expect(channel.createdThreadNames).toEqual([]);
+    expect(thread.sentMessages).toEqual([]);
+    expect(extractEmbedDescriptions(createButton.updates[0]?.embeds ?? [])).toEqual([
+      'Saved workdir is unavailable right now. Please choose another directory.'
+    ]);
+    expect(collectButtonLabels(createButton.updates[0]?.components ?? [])).toEqual([]);
+  });
+
+  it('does not create a session when history refresh fails with a path-validity error', async () => {
+    const events = createEventBus();
+    const createSessionCalls: Array<{ channelId: string; userId: string; cwd: string }> = [];
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession(input) {
+          createSessionCalls.push({
+            channelId: input.channelId,
+            userId: input.context.createdBy,
+            cwd: input.context.cwd
+          });
+          return { sessionId: 'session-history-invalid-path' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const thread = createFakeThread('thread-history-invalid-path');
+    const channel = createFakeChannel(thread);
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-invalid-path',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-invalid-path',
+              path: '/workspace/moved-app',
+              displayName: 'Moved App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir() {
+          throw new Error('workdir path does not exist: /workspace/moved-app');
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-invalid-path', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const historyButton = createButtonInteraction(historyButtonId);
+    await events.emit('interactionCreate', historyButton);
+
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(historyButton.updates[0]?.components ?? [])[0] ?? '',
+      ['workdir-invalid-path']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    const createButton = createButtonInteraction(
+      findButtonCustomIdByLabel(selectInteraction.updates[0]?.components ?? [], 'Create session') ?? ''
+    );
+    await events.emit('interactionCreate', createButton);
+
+    expect(createSessionCalls).toEqual([]);
+    expect(channel.createdThreadNames).toEqual([]);
+    expect(thread.sentMessages).toEqual([]);
+    expect(extractEmbedDescriptions(createButton.updates[0]?.embeds ?? [])).toEqual([
+      'Saved workdir is unavailable right now. Please choose another directory.'
+    ]);
+    expect(collectButtonLabels(createButton.updates[0]?.components ?? [])).toEqual([]);
+  });
+
+  it('truncates long history option labels and descriptions to Discord-safe lengths', async () => {
+    const events = createEventBus();
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-history-truncation' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+    const channel = createFakeChannel(createFakeThread('thread-history-truncation'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-history-truncation',
+      values: { cwd: null, model: 'haiku' }
+    });
+    const veryLongDisplayName = 'History '.repeat(20);
+    const veryLongPath = `/workspace/${'nested/'.repeat(18)}project-name`;
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-long',
+              path: veryLongPath,
+              displayName: veryLongDisplayName,
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-history-truncation', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      }
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+    const buttonInteraction = createButtonInteraction(collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '');
+    await events.emit('interactionCreate', buttonInteraction);
+
+    const optionLabels = collectStringSelectOptionLabels(buttonInteraction.updates[0]?.components ?? []);
+    const optionDescriptions = collectStringSelectOptionDescriptions(buttonInteraction.updates[0]?.components ?? []);
+    expect(optionLabels).toHaveLength(1);
+    expect(optionDescriptions).toHaveLength(1);
+    expect(optionLabels[0]?.length).toBeLessThanOrEqual(100);
+    expect(optionDescriptions[0]?.length).toBeLessThanOrEqual(100);
+    expect(optionLabels[0]).toMatch(/\.\.\.$/);
+    expect(optionDescriptions[0]).toMatch(/\.\.\.$/);
+  });
+
+  it('expires history selection after the wizard state ages out', async () => {
+    const events = createEventBus();
+    let currentTime = '2026-03-25T00:00:00.000Z';
+    const handlers = createCommandHandlers({
+      runnerClient: {
+        async createSession() {
+          return { sessionId: 'session-workdir-expired' };
+        },
+        async resolvePrompt() {
+          return { status: 'resolved' as const };
+        },
+        async answerQuestion() {}
+      },
+      audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: null, metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+      access: { canManageSessions: () => true },
+      allowedRoots: ['/workspace'],
+      now: () => currentTime
+    });
+    const channel = createFakeChannel(createFakeThread('thread-workdir-expired'));
+    const slashInteraction = createCreateSessionInteraction(channel, {
+      channelId: 'channel-workdir-expired',
+      values: { cwd: null, model: 'sonnet' }
+    });
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers,
+      runnerClient: {
+        async listWorkdirs() {
+          return [
+            {
+              id: 'workdir-expired',
+              path: '/workspace/expired-app',
+              displayName: 'Expired App',
+              source: 'scan' as const,
+              createdBy: 'discord-user-1',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              lastUsedAt: '2026-03-25T00:00:00.000Z',
+              useCount: 1
+            }
+          ];
+        },
+        async saveWorkdir(input: { path: string; displayName?: string; createdBy: string }) {
+          return createSavedWorkdirResult(input);
+        },
+        async getPendingPrompt() { return null; },
+        async listEvents() { return []; },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-workdir-expired', state: 'idle', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: { getByThreadId() { return null; } },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getChannel: async () => channel
+      },
+      now: () => currentTime
+    });
+
+    await bot.start();
+    await events.emit('interactionCreate', slashInteraction);
+
+    const historyButtonId = collectButtonCustomIds(slashInteraction.replies[0]?.components ?? [])[0] ?? '';
+    const historyButton = createButtonInteraction(historyButtonId);
+    await events.emit('interactionCreate', historyButton);
+
+    currentTime = '2026-03-25T00:11:00.000Z';
+    const selectInteraction = createStringSelectInteraction(
+      collectStringSelectCustomIds(historyButton.updates[0]?.components ?? [])[0] ?? '',
+      ['workdir-expired']
+    );
+    await events.emit('interactionCreate', selectInteraction);
+
+    expect(selectInteraction.updates).toEqual([
+      {
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Session setup expired. Please run /session-new again.'
+          })
+        ],
+        components: []
+      }
+    ]);
+  });
+
   it('answers pending questions from thread messages', async () => {
     const events = createEventBus();
     const answerCalls: Array<{ promptId: string; answer: string; userId: string }> = [];
@@ -863,6 +3404,141 @@ describe('discord control bot', () => {
         ]
       })
     );
+  });
+
+  it('reconnects the runner event stream after a transient failure and still surfaces permission prompts', async () => {
+    const events = createEventBus();
+    const sentMessages: Array<string | { content?: string; embeds?: unknown[]; components?: unknown[]; flags?: number }> = [];
+    let subscribeCalls = 0;
+
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers: createCommandHandlers({
+        runnerClient: {
+          async createSession() {
+            return { sessionId: 'session-reconnect' };
+          },
+          async resolvePrompt() {
+            return { status: 'resolved' as const };
+          },
+          async answerQuestion() {}
+        },
+        audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: 'session-reconnect', metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+        access: { canManageSessions: () => true },
+        allowedRoots: ['/workspace'],
+        now: () => '2026-03-25T00:00:00.000Z'
+      }),
+      runnerClient: {
+        async getPendingPrompt() {
+          return {
+            kind: 'permission',
+            promptId: 'prompt-reconnect',
+            runtimePromptId: 'perm-reconnect',
+            text: 'Approve after reconnect?'
+          };
+        },
+        async listEvents(input) {
+          expect(input.fromSeq).toBe(1);
+          return [];
+        },
+        subscribeEvents(input) {
+          subscribeCalls += 1;
+          expect(input.fromSeq).toBe(1);
+
+          if (subscribeCalls === 1) {
+            return {
+              async *[Symbol.asyncIterator]() {
+                throw new TypeError('fetch failed');
+              }
+            };
+          }
+
+          return createAsyncIterable<RunnerEventEnvelope>([
+            {
+              seq: 1,
+              event: { type: 'permission.requested', requestId: 'perm-reconnect', prompt: 'Approve after reconnect?' }
+            }
+          ]);
+        },
+        async health() {
+          return { ok: true };
+        },
+        async sendTurn() {},
+        async getSession() {
+          return {
+            sessionId: 'session-reconnect',
+            state: 'running',
+            recoveryStatus: 'ok',
+            pendingPrompt: null
+          };
+        }
+      },
+      bindings: {
+        getByThreadId() {
+          return null;
+        },
+        listAll() {
+          return [
+            {
+              threadId: 'thread-reconnect',
+              sessionId: 'session-reconnect',
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z'
+            }
+          ];
+        }
+      },
+      sessions: {
+        listActive() {
+          return [
+            {
+              id: 'session-reconnect',
+              state: 'running',
+              runtimeSessionId: null,
+              context: {
+                cwd: '/workspace/app',
+                allowedRoot: '/workspace',
+                model: 'sonnet',
+                runtimeOptions: { permissionMode: 'default' },
+                createdBy: 'discord-user-1'
+              },
+              createdAt: '2026-03-25T00:00:00.000Z',
+              updatedAt: '2026-03-25T00:00:00.000Z'
+            }
+          ];
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {},
+        getThreadChannel: async () => ({
+          isThread: () => true,
+          send: async (content: string | { content?: string; embeds?: unknown[]; components?: unknown[]; flags?: number }) => {
+            sentMessages.push(content);
+          }
+        })
+      }
+    });
+
+    await bot.start();
+
+    await vi.waitFor(() => {
+      expect(subscribeCalls).toBe(2);
+      expect(sentMessages).toContainEqual(
+        expect.objectContaining({
+          embeds: [
+            expect.objectContaining({
+              color: 0x6b7280,
+              description: 'Approval needed for session session-reconnect: Approve after reconnect?'
+            })
+          ],
+          components: expect.any(Array)
+        })
+      );
+    });
   });
 
   it('replays startup state and renders runner output for live thread messages', async () => {
@@ -1235,7 +3911,12 @@ describe('discord control bot', () => {
       }),
       runnerClient: {
         async getPendingPrompt() {
-          return null;
+          return {
+            kind: 'permission' as const,
+            promptId: 'prompt-live',
+            runtimePromptId: 'perm-live',
+            text: 'Approve live step?'
+          };
         },
         async listEvents(input) {
           restartCalls.push(input.fromSeq);
@@ -1317,7 +3998,115 @@ describe('discord control bot', () => {
     await secondBot.start();
 
     expect(restartCalls).toEqual([5, 5]);
-    expect(restartedMessages).toEqual([]);
+    expect(restartedMessages).toEqual([
+      expect.objectContaining({
+        embeds: [
+          expect.objectContaining({
+            color: 0x6b7280,
+            description: 'Approval needed for session session-1: Approve live step?'
+          })
+        ],
+        components: expect.any(Array)
+      })
+    ]);
+  });
+
+  it('renders approval buttons even when the runtime prompt id is very long', async () => {
+    const events = createEventBus();
+    const sentMessages: Array<string | { content?: string; embeds?: unknown[]; components?: unknown[] }> = [];
+    const longPromptId = 'prompt-'.repeat(30);
+    const bot = createDiscordControlBot({
+      token: 'discord-token',
+      clientId: 'client-1',
+      handlers: createCommandHandlers({
+        runnerClient: {
+          async createSession() {
+            return { sessionId: 'session-long-prompt' };
+          },
+          async resolvePrompt() {
+            return { status: 'resolved' as const };
+          },
+          async answerQuestion() {}
+        },
+        audit: { append() { return { id: 1, action: 'a', actorType: 'user', actorId: 'u', source: 'discord-control', sessionId: 'session-long-prompt', metadata: {}, createdAt: '2026-03-25T00:00:00.000Z' }; } },
+        access: { canManageSessions: () => true },
+        allowedRoots: ['/workspace'],
+        now: () => '2026-03-25T00:00:00.000Z'
+      }),
+      runnerClient: {
+        async getPendingPrompt() {
+          return {
+            kind: 'permission' as const,
+            promptId: 'prompt-1',
+            runtimePromptId: longPromptId,
+            text: 'Allow long prompt id?'
+          };
+        },
+        async listEvents() {
+          return [
+            {
+              seq: 1,
+              event: { type: 'permission.requested', requestId: 'prompt-1', runtimePromptId: longPromptId, prompt: 'Allow long prompt id?' }
+            }
+          ];
+        },
+        async *subscribeEvents() {},
+        async health() { return { ok: true }; },
+        async sendTurn() {},
+        async getSession() {
+          return { sessionId: 'session-long-prompt', state: 'awaiting_permission', recoveryStatus: 'ok', pendingPrompt: null };
+        }
+      },
+      bindings: {
+        getByThreadId(threadId) {
+          if (threadId !== 'thread-long-prompt') {
+            return null;
+          }
+
+          return {
+            threadId: 'thread-long-prompt',
+            sessionId: 'session-long-prompt',
+            createdAt: '2026-03-25T00:00:00.000Z',
+            updatedAt: '2026-03-25T00:00:00.000Z'
+          };
+        }
+      },
+      discord: {
+        login: events.login,
+        destroy: events.destroy,
+        on: events.on,
+        registerCommands: async () => {}
+      }
+    });
+
+    await bot.start();
+    await events.emit('messageCreate', {
+      author: { bot: false, id: 'discord-user-5' },
+      content: 'run tests',
+      channelId: 'thread-long-prompt',
+      channel: {
+        isThread: () => true,
+        send: async (content: string | { content?: string; embeds?: unknown[]; components?: unknown[] }) => {
+          sentMessages.push(content);
+        }
+      },
+      member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } }
+    });
+
+    const promptMessage = sentMessages.find(
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        extractEmbedDescriptions((message as { embeds?: unknown[] }).embeds ?? []).some((description) =>
+          description.includes('Approval needed for session session-long-prompt: Allow long prompt id?')
+        )
+    ) as { components?: unknown[] } | undefined;
+    expect(promptMessage).toBeDefined();
+    expect(collectButtonCustomIds(promptMessage?.components ?? [])).toEqual([
+      'prompt:allow_once:session-long-prompt',
+      'prompt:deny_once:session-long-prompt'
+    ]);
+    expect(collectButtonCustomIds(promptMessage?.components ?? []).every((customId) => customId.length <= 100)).toBe(true);
   });
 
   it('does not re-send the same tool cards after restart recovery', async () => {
@@ -3159,10 +5948,11 @@ describe('discord control bot', () => {
 
   it('acknowledges approved prompts with concise text', async () => {
     const events = createEventBus();
+    const resolvedPromptIds: string[] = [];
     const interaction = {
       isChatInputCommand: () => false,
       isButton: () => true,
-      customId: 'prompt:allow_once:prompt-ok:session-1',
+      customId: 'prompt:allow_once:session-1',
       user: { id: 'discord-user-1' },
       member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } },
       messageDeleted: false,
@@ -3185,7 +5975,8 @@ describe('discord control bot', () => {
           async createSession() {
             return { sessionId: 'session-1' };
           },
-          async resolvePrompt() {
+          async resolvePrompt(input) {
+            resolvedPromptIds.push(input.promptId);
             return { status: 'resolved' as const };
           },
           async answerQuestion() {}
@@ -3196,7 +5987,14 @@ describe('discord control bot', () => {
         now: () => '2026-03-25T00:00:00.000Z'
       }),
       runnerClient: {
-        async getPendingPrompt() { return null; },
+        async getPendingPrompt() {
+          return {
+            kind: 'permission',
+            promptId: 'prompt-ok',
+            runtimePromptId: 'toolu_runtime_only',
+            text: 'Allow write?'
+          };
+        },
         async listEvents() { return []; },
         async *subscribeEvents() {},
         async health() { return { ok: true }; },
@@ -3217,6 +6015,7 @@ describe('discord control bot', () => {
 
     expect(interaction.messageDeleted).toBe(true);
     expect(interaction.updates).toEqual([]);
+    expect(resolvedPromptIds).toEqual(['prompt-ok']);
   });
 
   it('skips missing recovery threads instead of crashing startup', async () => {
@@ -4013,6 +6812,181 @@ function collectComponentText(components: readonly unknown[]): string[] {
   return lines;
 }
 
+function collectButtonLabels(components: readonly unknown[]): string[] {
+  const labels: string[] = [];
+
+  for (const component of components) {
+    const value = typeof component === 'object' && component !== null && 'toJSON' in component && typeof (component as { toJSON: () => unknown }).toJSON === 'function'
+      ? (component as { toJSON: () => unknown }).toJSON()
+      : component;
+
+    if (typeof value !== 'object' || value === null) {
+      continue;
+    }
+
+    if ('label' in value && typeof (value as { label?: unknown }).label === 'string') {
+      labels.push((value as { label: string }).label);
+    }
+
+    if ('components' in value && Array.isArray((value as { components?: unknown[] }).components)) {
+      labels.push(...collectButtonLabels((value as { components: unknown[] }).components));
+    }
+  }
+
+  return labels;
+}
+
+function collectButtonCustomIds(components: readonly unknown[]): string[] {
+  const ids: string[] = [];
+
+  for (const component of components) {
+    const value = typeof component === 'object' && component !== null && 'toJSON' in component && typeof (component as { toJSON: () => unknown }).toJSON === 'function'
+      ? (component as { toJSON: () => unknown }).toJSON()
+      : component;
+
+    if (typeof value !== 'object' || value === null) {
+      continue;
+    }
+
+    if ('custom_id' in value && typeof (value as { custom_id?: unknown }).custom_id === 'string') {
+      ids.push((value as { custom_id: string }).custom_id);
+    }
+
+    if ('components' in value && Array.isArray((value as { components?: unknown[] }).components)) {
+      ids.push(...collectButtonCustomIds((value as { components: unknown[] }).components));
+    }
+  }
+
+  return ids;
+}
+
+function collectStringSelectCustomIds(components: readonly unknown[]): string[] {
+  return collectSelectComponents(components).map((component) => component.customId);
+}
+
+function collectStringSelectOptionLabels(components: readonly unknown[]): string[] {
+  return collectSelectComponents(components).flatMap((component) => component.optionLabels);
+}
+
+function collectStringSelectOptionDescriptions(components: readonly unknown[]): string[] {
+  return collectSelectComponents(components).flatMap((component) => component.optionDescriptions);
+}
+
+function collectStringSelectOptionValues(components: readonly unknown[]): string[] {
+  return collectSelectComponents(components).flatMap((component) => component.optionValues);
+}
+
+function findButtonCustomIdByLabel(components: readonly unknown[], label: string): string | null {
+  for (const component of components) {
+    const value = typeof component === 'object' && component !== null && 'toJSON' in component && typeof (component as { toJSON: () => unknown }).toJSON === 'function'
+      ? (component as { toJSON: () => unknown }).toJSON()
+      : component;
+
+    if (typeof value !== 'object' || value === null) {
+      continue;
+    }
+
+    if (
+      'label' in value &&
+      'custom_id' in value &&
+      typeof (value as { label?: unknown }).label === 'string' &&
+      typeof (value as { custom_id?: unknown }).custom_id === 'string' &&
+      (value as { label: string }).label === label
+    ) {
+      return (value as { custom_id: string }).custom_id;
+    }
+
+    if ('components' in value && Array.isArray((value as { components?: unknown[] }).components)) {
+      const nested = findButtonCustomIdByLabel((value as { components: unknown[] }).components, label);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractEmbedDescriptions(embeds: readonly unknown[]): string[] {
+  return embeds.flatMap((embed) => {
+    if (typeof embed !== 'object' || embed === null || !('description' in embed)) {
+      return [];
+    }
+
+    return typeof (embed as { description?: unknown }).description === 'string'
+      ? [(embed as { description: string }).description]
+      : [];
+  });
+}
+
+function collectSelectComponents(components: readonly unknown[]): Array<{
+  customId: string;
+  optionLabels: string[];
+  optionDescriptions: string[];
+  optionValues: string[];
+}> {
+  const collected: Array<{
+    customId: string;
+    optionLabels: string[];
+    optionDescriptions: string[];
+    optionValues: string[];
+  }> = [];
+
+  for (const component of components) {
+    const value = typeof component === 'object' && component !== null && 'toJSON' in component && typeof (component as { toJSON: () => unknown }).toJSON === 'function'
+      ? (component as { toJSON: () => unknown }).toJSON()
+      : component;
+
+    if (typeof value !== 'object' || value === null) {
+      continue;
+    }
+
+    if (
+      'custom_id' in value &&
+      typeof (value as { custom_id?: unknown }).custom_id === 'string' &&
+      'options' in value &&
+      Array.isArray((value as { options?: unknown[] }).options)
+    ) {
+        collected.push({
+          customId: (value as { custom_id: string }).custom_id,
+          optionLabels: ((value as { options: unknown[] }).options).flatMap((option) => {
+          if (typeof option !== 'object' || option === null || !('label' in option)) {
+            return [];
+          }
+
+          return typeof (option as { label?: unknown }).label === 'string'
+            ? [(option as { label: string }).label]
+            : [];
+        }),
+          optionDescriptions: ((value as { options: unknown[] }).options).flatMap((option) => {
+            if (typeof option !== 'object' || option === null || !('description' in option)) {
+              return [];
+          }
+
+            return typeof (option as { description?: unknown }).description === 'string'
+              ? [(option as { description: string }).description]
+              : [];
+          }),
+          optionValues: ((value as { options: unknown[] }).options).flatMap((option) => {
+            if (typeof option !== 'object' || option === null || !('value' in option)) {
+              return [];
+            }
+
+            return typeof (option as { value?: unknown }).value === 'string'
+              ? [(option as { value: string }).value]
+              : [];
+          })
+        });
+    }
+
+    if ('components' in value && Array.isArray((value as { components?: unknown[] }).components)) {
+      collected.push(...collectSelectComponents((value as { components: unknown[] }).components));
+    }
+  }
+
+  return collected;
+}
+
 function createAsyncIterable<T>(values: T[]) {
   let resolveDrain: () => void = () => undefined;
   const drained = new Promise<void>((resolve) => {
@@ -4029,6 +7003,20 @@ function createAsyncIterable<T>(values: T[]) {
     async drain() {
       await drained;
     }
+  };
+}
+
+function createSavedWorkdirResult(input: { path: string; displayName?: string; createdBy: string }) {
+  return {
+    id: `saved:${input.path}`,
+    path: input.path,
+    displayName: input.displayName ?? null,
+    source: 'scan' as const,
+    createdBy: input.createdBy,
+    createdAt: '2026-03-25T00:00:00.000Z',
+    updatedAt: '2026-03-25T00:00:00.000Z',
+    lastUsedAt: '2026-03-25T00:00:00.000Z',
+    useCount: 1
   };
 }
 
@@ -4264,10 +7252,10 @@ function createCreateSessionInteraction(
     throwOnChannelAccess?: boolean;
     userId?: string;
     roleIds?: string[];
-    values?: Record<string, string>;
+    values?: Record<string, string | null>;
   }
 ) {
-  const replies: Array<{ content: string; ephemeral: boolean }> = [];
+  const replies: Array<{ content?: string; ephemeral: boolean; embeds?: unknown[]; components?: unknown[] }> = [];
 
   const interaction = {
     replies,
@@ -4283,7 +7271,7 @@ function createCreateSessionInteraction(
     },
     options: {
       getString(name: string) {
-        const values: Record<string, string> = {
+        const values: Record<string, string | null> = {
           cwd: '/workspace/app',
           model: 'sonnet',
           ...(options?.values ?? {})
@@ -4291,11 +7279,11 @@ function createCreateSessionInteraction(
         return values[name] ?? null;
       }
     },
-    async reply(input: { content: string; ephemeral: boolean }) {
+    async reply(input: { content?: string; ephemeral: boolean; embeds?: unknown[]; components?: unknown[] }) {
       replies.push(input);
     }
   } as {
-    replies: Array<{ content: string; ephemeral: boolean }>;
+    replies: Array<{ content?: string; ephemeral: boolean; embeds?: unknown[]; components?: unknown[] }>;
     isChatInputCommand: () => boolean;
     isButton: () => boolean;
     commandName: string;
@@ -4303,7 +7291,7 @@ function createCreateSessionInteraction(
     user: { id: string };
     member: { roles: { cache: Map<string, { id: string }> } };
     options: { getString(name: string): string | null };
-    reply(input: { content: string; ephemeral: boolean }): Promise<void>;
+    reply(input: { content?: string; ephemeral: boolean; embeds?: unknown[]; components?: unknown[] }): Promise<void>;
     channel?: ReturnType<typeof createFakeChannel>;
   };
 
@@ -4318,4 +7306,78 @@ function createCreateSessionInteraction(
 
   interaction.channel = channel;
   return interaction;
+}
+
+function createButtonInteraction(customId: string, userId = 'discord-user-1') {
+  return {
+    isChatInputCommand: () => false,
+    isButton: () => true,
+    customId,
+    user: { id: userId },
+    member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } },
+    modals: [] as Array<Record<string, unknown>>,
+    updates: [] as Array<{ content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    replies: [] as Array<{ content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    async showModal(input: { toJSON?: () => Record<string, unknown> } | Record<string, unknown>) {
+      this.modals.push(typeof input.toJSON === 'function' ? input.toJSON() : input);
+    },
+    async update(input: { content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.updates.push(input);
+    },
+    async reply(input: { content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.replies.push(input);
+    }
+  };
+}
+
+function createStringSelectInteraction(customId: string, values: string[], userId = 'discord-user-1') {
+  return {
+    isChatInputCommand: () => false,
+    isButton: () => false,
+    isStringSelectMenu: () => true,
+    isModalSubmit: () => false,
+    customId,
+    values,
+    channelId: 'channel-1',
+    user: { id: userId },
+    member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } },
+    modals: [] as Array<Record<string, unknown>>,
+    updates: [] as Array<{ content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    replies: [] as Array<{ content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    async showModal(input: { toJSON?: () => Record<string, unknown> } | Record<string, unknown>) {
+      this.modals.push(typeof input.toJSON === 'function' ? input.toJSON() : input);
+    },
+    async update(input: { content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.updates.push(input);
+    },
+    async reply(input: { content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.replies.push(input);
+    }
+  };
+}
+
+function createModalSubmitInteraction(customId: string, values: Record<string, string>, userId = 'discord-user-1') {
+  return {
+    isChatInputCommand: () => false,
+    isButton: () => false,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => true,
+    customId,
+    channelId: 'channel-1',
+    user: { id: userId },
+    member: { roles: { cache: new Map([['operator', { id: 'operator' }]]) } },
+    fields: {
+      getTextInputValue(name: string) {
+        return values[name] ?? '';
+      }
+    },
+    updates: [] as Array<{ content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    replies: [] as Array<{ content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }>,
+    async update(input: { content?: string; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.updates.push(input);
+    },
+    async reply(input: { content?: string; ephemeral: boolean; embeds?: Array<{ description?: string; color?: number }>; components?: unknown[] }) {
+      this.replies.push(input);
+    }
+  };
 }

@@ -294,6 +294,31 @@ describe('session orchestrator', () => {
       }
     ]);
   });
+
+  it('stores prompt expirations in the future instead of immediately expiring them', async () => {
+    const runtime = createFakeRuntimeAdapter([
+      { type: 'permission.requested', requestId: 'perm-ttl', prompt: 'Allow write?' },
+    ]);
+    const orchestrator = createOrchestrator(runtime);
+    const session = await orchestrator.createSession({
+      channelId: 'thread-ttl',
+      context: createContext('discord-user-ttl')
+    });
+
+    const turn = orchestrator.sendTurn(session.sessionId, 'run tests');
+
+    await expect(waitForState(orchestrator, session.sessionId)).resolves.toBe(
+      SessionState.awaitingPermission
+    );
+
+    expect(orchestrator.getPendingPrompt(session.sessionId)).toMatchObject({
+      id: 'prompt-1',
+      expiresAt: '2026-03-25T00:10:00.000Z',
+      createdAt: '2026-03-25T00:00:00.000Z'
+    });
+
+    turn.catch(() => undefined);
+  });
 });
 
 function createOrchestrator(runtime: RuntimeAdapter) {

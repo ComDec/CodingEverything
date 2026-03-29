@@ -40,6 +40,32 @@ export type CommandHandlerDeps = Readonly<{
   now?: () => string;
 }>;
 
+type CreateSessionBaseInput = Readonly<{
+  channelId: string;
+  model: string;
+  displayName?: string;
+  effort?: 'low' | 'medium' | 'high' | 'max';
+  skills?: readonly string[];
+  userId: string;
+  roleIds: string[];
+}>;
+
+type DirectCreateSessionInput = CreateSessionBaseInput & Readonly<{
+  cwd: string;
+}>;
+
+type CreateSessionInput = CreateSessionBaseInput & Readonly<{
+  cwd?: string;
+}>;
+
+type CreatedSessionResult = Readonly<{
+  sessionId: string;
+}>;
+
+type RequiresWorkdirResult = Readonly<{
+  status: 'requires_workdir';
+}>;
+
 export function createCommandHandlers(deps: CommandHandlerDeps) {
   const audit = deps.audit;
   const access = deps.access ?? {
@@ -48,22 +74,14 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
         userId: input.userId,
         roles: input.roles,
         allowedUserIds: [],
-        allowedRoleIds: []
+        allowedRoleIds: [],
       });
-    }
-};
+    },
+  };
 
   const now = deps.now ?? (() => new Date().toISOString());
 
-  function prepareCreateSession(input: {
-    cwd: string;
-    model: string;
-    displayName: string;
-    effort?: 'low' | 'medium' | 'high' | 'max';
-    skills?: readonly string[];
-    userId: string;
-    roleIds: string[];
-  }) {
+  function prepareCreateSession(input: DirectCreateSessionInput) {
     assertCanManage(access, input.userId, input.roleIds, 'create sessions');
     const cwd = assertPathWithinRoots(input.cwd, [...deps.allowedRoots]);
     const allowedRoot = resolveAllowedRoot(cwd, [...deps.allowedRoots]);
@@ -78,56 +96,61 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
       effort,
       skills,
       userId: input.userId,
-      roleIds: input.roleIds
+      roleIds: input.roleIds,
     };
+  }
+
+  async function handleCreateSession(input: DirectCreateSessionInput): Promise<CreatedSessionResult>;
+  async function handleCreateSession(input: CreateSessionInput): Promise<CreatedSessionResult | RequiresWorkdirResult>;
+  async function handleCreateSession(
+    input: CreateSessionInput,
+  ): Promise<CreatedSessionResult | RequiresWorkdirResult> {
+    if (!input.cwd) {
+      assertCanManage(access, input.userId, input.roleIds, 'create sessions');
+      return { status: 'requires_workdir' };
+    }
+
+    const prepared = prepareCreateSession({
+      ...input,
+      cwd: input.cwd,
+    });
+
+    const session = await deps.runnerClient.createSession({
+      channelId: input.channelId,
+      context: createSessionContext({
+        cwd: prepared.cwd,
+        allowedRoot: prepared.allowedRoot,
+        model: prepared.model,
+        runtimeOptions: {
+          permissionMode: 'default',
+          ...(prepared.effort ? { effort: prepared.effort } : {}),
+          ...(prepared.skills.length > 0 ? { skills: prepared.skills } : {}),
+        },
+        createdBy: prepared.userId,
+        ...(prepared.displayName ? { displayName: prepared.displayName } : {}),
+      }),
+    });
+
+    audit.append({
+      action: 'discord.session.create',
+      actorType: 'user',
+      actorId: input.userId,
+      source: 'discord-control',
+      sessionId: session.sessionId,
+      metadata: {
+        channelId: input.channelId,
+        cwd: prepared.cwd,
+        model: prepared.model,
+      },
+      createdAt: now(),
+    });
+
+    return { sessionId: session.sessionId };
   }
 
   return {
     prepareCreateSession,
-    async handleCreateSession(input: {
-      channelId: string;
-      cwd: string;
-      model: string;
-      displayName: string;
-      effort?: 'low' | 'medium' | 'high' | 'max';
-      skills?: readonly string[];
-      userId: string;
-      roleIds: string[];
-    }): Promise<{ sessionId: string }> {
-      const prepared = prepareCreateSession(input);
-
-      const session = await deps.runnerClient.createSession({
-        channelId: input.channelId,
-        context: createSessionContext({
-          cwd: prepared.cwd,
-          allowedRoot: prepared.allowedRoot,
-          model: prepared.model,
-          runtimeOptions: {
-            permissionMode: 'default',
-            ...(prepared.effort ? { effort: prepared.effort } : {}),
-            ...(prepared.skills.length > 0 ? { skills: prepared.skills } : {})
-          },
-          createdBy: prepared.userId,
-          displayName: prepared.displayName
-        })
-      });
-
-      audit.append({
-        action: 'discord.session.create',
-        actorType: 'user',
-        actorId: input.userId,
-        source: 'discord-control',
-        sessionId: session.sessionId,
-        metadata: {
-          channelId: input.channelId,
-          cwd: prepared.cwd,
-          model: prepared.model
-        },
-        createdAt: now()
-      });
-
-      return { sessionId: session.sessionId };
-    },
+    handleCreateSession,
 
     async handleResolvePrompt(input: {
       promptId: string;
@@ -140,7 +163,7 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
 
       const result = await deps.runnerClient.resolvePrompt({
         promptId: input.promptId,
-        resolution: input.resolution
+        resolution: input.resolution,
       });
 
       audit.append({
@@ -151,9 +174,9 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
         sessionId: input.sessionId ?? null,
         metadata: {
           promptId: input.promptId,
-          resolution: input.resolution
+          resolution: input.resolution,
         },
-        createdAt: now()
+        createdAt: now(),
       });
 
       return result;
@@ -170,7 +193,7 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
 
       await deps.runnerClient.answerQuestion({
         promptId: input.promptId,
-        answer: input.answer
+        answer: input.answer,
       });
 
       audit.append({
@@ -181,13 +204,13 @@ export function createCommandHandlers(deps: CommandHandlerDeps) {
         sessionId: input.sessionId ?? null,
         metadata: {
           promptId: input.promptId,
-          answer: input.answer
+          answer: input.answer,
         },
-        createdAt: now()
+        createdAt: now(),
       });
 
       return { status: 'answered' };
-    }
+    },
   };
 }
 
@@ -224,7 +247,7 @@ function assertCanManage(
   access: SessionAccess,
   userId: string,
   roleIds: string[],
-  action: string
+  action: string,
 ): void {
   if (!access.canManageSessions({ userId, roles: roleIds })) {
     throw new Error(`User is not authorized to ${action}`);

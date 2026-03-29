@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createCommandHandlers } from '../../src/discord-control/command-handlers.js';
+import type {
+  RunnerWorkdirListResponse,
+  RunnerWorkdirSaveRequest,
+  RunnerWorkdirScanResponse
+} from '../../src/shared/contracts/runner-api.js';
 import { createDatabase, type Database } from '../../src/shared/db/database.js';
 import { createRepositories } from '../../src/shared/db/repositories.js';
 
@@ -446,6 +451,67 @@ describe('command handlers', () => {
         }
       }
     ]);
+  });
+
+  it('returns a workdir-selection result when cwd is omitted', async () => {
+    const { repositories } = createTestContext();
+    const runnerClient = createRunnerClientDouble({
+      createSessionResult: { sessionId: 'session-selector' }
+    });
+    const handlers = createCommandHandlers({
+      runnerClient,
+      audit: repositories.audit,
+      access: {
+        canManageSessions: () => true
+      },
+      allowedRoots: ['/workspace'],
+      now: () => '2026-03-25T00:00:00.000Z'
+    });
+
+    const result = await handlers.handleCreateSession({
+      channelId: 'thread-selector',
+      model: 'sonnet',
+      userId: 'discord-user-9',
+      roleIds: ['operator']
+    });
+
+    expect(result).toEqual({ status: 'requires_workdir' });
+    expect(runnerClient.createSessionCalls).toEqual([]);
+  });
+
+  it('exposes shared runner workdir contract types', () => {
+    const saveRequest: RunnerWorkdirSaveRequest = {
+      path: '/workspace/project',
+      displayName: 'project',
+      createdBy: 'discord-user-1'
+    };
+    const listResponse: RunnerWorkdirListResponse = [
+      {
+        id: 'workdir-1',
+        path: '/workspace/project',
+        displayName: 'project',
+        source: 'scan',
+        createdBy: 'discord-user-1',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:00:00.000Z',
+        lastUsedAt: '2026-03-25T00:00:00.000Z',
+        useCount: 1
+      }
+    ];
+    const scanResponse: RunnerWorkdirScanResponse = {
+      items: [
+        {
+          path: '/workspace/project',
+          displayName: 'project',
+          score: 2
+        }
+      ],
+      nextOffset: null
+    };
+
+    expect(saveRequest.path).toBe('/workspace/project');
+    expect(listResponse[0]?.source).toBe('scan');
+    expect(scanResponse.items[0]?.score).toBe(2);
   });
 });
 

@@ -324,4 +324,262 @@ describe('repositories', () => {
 
     database.close();
   });
+
+  it('stores, upserts, lists, and marks workdirs as used', async () => {
+    const databasePath = await createTempDatabasePath();
+    const database = createDatabase({ filename: databasePath });
+    const repositories = createRepositories(database);
+
+    repositories.workdirs.upsert({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'App One',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z',
+      lastUsedAt: '2026-03-25T00:00:00.000Z',
+      useCount: 1
+    });
+    repositories.workdirs.upsert({
+      id: 'workdir-2',
+      path: '/srv/app-two',
+      displayName: 'App Two',
+      source: 'scan',
+      createdBy: 'user-2',
+      createdAt: '2026-03-25T00:01:00.000Z',
+      updatedAt: '2026-03-25T00:01:00.000Z',
+      lastUsedAt: '2026-03-25T00:01:00.000Z',
+      useCount: 2
+    });
+    repositories.workdirs.upsert({
+      id: 'workdir-3',
+      path: '/srv/app-three',
+      displayName: 'Alpha Workspace',
+      source: 'scan',
+      createdBy: 'user-3',
+      createdAt: '2026-03-25T00:02:00.000Z',
+      updatedAt: '2026-03-25T00:02:00.000Z',
+      lastUsedAt: '2026-03-25T00:01:00.000Z',
+      useCount: 3
+    });
+
+    repositories.workdirs.upsert({
+      id: 'workdir-override',
+      path: '/srv/app-one',
+      displayName: null,
+      source: 'scan',
+      createdBy: 'user-4',
+      createdAt: '2026-03-25T00:03:00.000Z',
+      updatedAt: '2026-03-25T00:03:00.000Z',
+      lastUsedAt: '2026-03-25T00:03:00.000Z',
+      useCount: 4
+    });
+
+    expect(repositories.workdirs.getById('workdir-1')).toEqual({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'App One',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:03:00.000Z',
+      lastUsedAt: '2026-03-25T00:03:00.000Z',
+      useCount: 4
+    });
+    expect(repositories.workdirs.getByPath('/srv/app-one')).toEqual({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'App One',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:03:00.000Z',
+      lastUsedAt: '2026-03-25T00:03:00.000Z',
+      useCount: 4
+    });
+
+    repositories.workdirs.upsert({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'Renamed App One',
+      source: 'scan',
+      createdBy: 'user-5',
+      createdAt: '2026-03-25T00:04:00.000Z',
+      updatedAt: '2026-03-25T00:04:00.000Z',
+      lastUsedAt: '2026-03-25T00:04:00.000Z',
+      useCount: 5
+    });
+    repositories.workdirs.markUsed({
+      id: 'workdir-2',
+      lastUsedAt: '2026-03-25T00:05:00.000Z',
+      updatedAt: '2026-03-25T00:05:00.000Z'
+    });
+
+    expect(repositories.workdirs.getByPath('/srv/app-one')).toEqual({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'Renamed App One',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:04:00.000Z',
+      lastUsedAt: '2026-03-25T00:04:00.000Z',
+      useCount: 5
+    });
+    expect(repositories.workdirs.getById('workdir-2')).toEqual({
+      id: 'workdir-2',
+      path: '/srv/app-two',
+      displayName: 'App Two',
+      source: 'scan',
+      createdBy: 'user-2',
+      createdAt: '2026-03-25T00:01:00.000Z',
+      updatedAt: '2026-03-25T00:05:00.000Z',
+      lastUsedAt: '2026-03-25T00:05:00.000Z',
+      useCount: 3
+    });
+    expect(repositories.workdirs.listRecent()).toEqual([
+      {
+        id: 'workdir-2',
+        path: '/srv/app-two',
+        displayName: 'App Two',
+        source: 'scan',
+        createdBy: 'user-2',
+        createdAt: '2026-03-25T00:01:00.000Z',
+        updatedAt: '2026-03-25T00:05:00.000Z',
+        lastUsedAt: '2026-03-25T00:05:00.000Z',
+        useCount: 3
+      },
+      {
+        id: 'workdir-1',
+        path: '/srv/app-one',
+        displayName: 'Renamed App One',
+        source: 'scan',
+        createdBy: 'user-1',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:04:00.000Z',
+        lastUsedAt: '2026-03-25T00:04:00.000Z',
+        useCount: 5
+      },
+      {
+        id: 'workdir-3',
+        path: '/srv/app-three',
+        displayName: 'Alpha Workspace',
+        source: 'scan',
+        createdBy: 'user-3',
+        createdAt: '2026-03-25T00:02:00.000Z',
+        updatedAt: '2026-03-25T00:02:00.000Z',
+        lastUsedAt: '2026-03-25T00:01:00.000Z',
+        useCount: 3
+      }
+    ]);
+
+    database.close();
+  });
+
+  it('upserts an existing workdir path without pre-reading it first', async () => {
+    const databasePath = await createTempDatabasePath();
+    const database = createDatabase({ filename: databasePath });
+    const repositories = createRepositories(database);
+
+    database
+      .prepare(
+        `
+          INSERT INTO workdirs (
+            id,
+            path,
+            display_name,
+            source,
+            created_by,
+            created_at,
+            updated_at,
+            last_used_at,
+            use_count
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      )
+      .run(
+        'workdir-1',
+        '/srv/app-one',
+        'App One',
+        'scan',
+        'user-1',
+        '2026-03-25T00:00:00.000Z',
+        '2026-03-25T00:00:00.000Z',
+        '2026-03-25T00:00:00.000Z',
+        1
+      );
+
+    const originalPrepare = database.prepare.bind(database);
+    database.prepare = ((sql: string) => {
+      if (sql.includes('FROM workdirs') && sql.includes('WHERE path = ?')) {
+        throw new Error('upsert should not pre-read workdirs by path');
+      }
+
+      return originalPrepare(sql);
+    }) as typeof database.prepare;
+
+    repositories.workdirs.upsert({
+      id: 'workdir-override',
+      path: '/srv/app-one',
+      displayName: null,
+      source: 'scan',
+      createdBy: 'user-2',
+      createdAt: '2026-03-25T00:01:00.000Z',
+      updatedAt: '2026-03-25T00:01:00.000Z',
+      lastUsedAt: '2026-03-25T00:01:00.000Z',
+      useCount: 4
+    });
+
+    expect(repositories.workdirs.getById('workdir-1')).toEqual({
+      id: 'workdir-1',
+      path: '/srv/app-one',
+      displayName: 'App One',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:01:00.000Z',
+      lastUsedAt: '2026-03-25T00:01:00.000Z',
+      useCount: 4
+    });
+
+    database.close();
+  });
+
+  it('lists recent workdirs by display name when last_used_at ties', async () => {
+    const databasePath = await createTempDatabasePath();
+    const database = createDatabase({ filename: databasePath });
+    const repositories = createRepositories(database);
+
+    repositories.workdirs.upsert({
+      id: 'workdir-b',
+      path: '/srv/bravo',
+      displayName: 'Bravo Workspace',
+      source: 'scan',
+      createdBy: 'user-1',
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z',
+      lastUsedAt: '2026-03-25T00:10:00.000Z',
+      useCount: 1
+    });
+    repositories.workdirs.upsert({
+      id: 'workdir-a',
+      path: '/srv/alpha',
+      displayName: 'Alpha Workspace',
+      source: 'scan',
+      createdBy: 'user-2',
+      createdAt: '2026-03-25T00:01:00.000Z',
+      updatedAt: '2026-03-25T00:01:00.000Z',
+      lastUsedAt: '2026-03-25T00:10:00.000Z',
+      useCount: 1
+    });
+
+    expect(repositories.workdirs.listRecent().map((workdir) => workdir.displayName)).toEqual([
+      'Alpha Workspace',
+      'Bravo Workspace'
+    ]);
+
+    database.close();
+  });
 });

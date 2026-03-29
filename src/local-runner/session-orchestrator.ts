@@ -238,6 +238,8 @@ export function createSessionOrchestrator(deps: SessionOrchestratorDeps) {
   };
 }
 
+const PROMPT_TTL_MS = 10 * 60 * 1000;
+
 async function handleRuntimeEvent(input: {
   deps: SessionOrchestratorDeps;
   createId: (prefix: string) => string;
@@ -256,7 +258,7 @@ async function handleRuntimeEvent(input: {
       requestId: input.event.requestId,
       runtimePromptId: input.event.runtimePromptId,
       prompt: input.event.prompt,
-      expiresAt: input.now(),
+      expiresAt: computePromptExpiration(input.now()),
       createdAt: input.now()
     });
     updateSessionState(
@@ -283,7 +285,7 @@ async function handleRuntimeEvent(input: {
       questionId: input.event.questionId,
       runtimePromptId: input.event.runtimePromptId,
       text: input.event.text,
-      expiresAt: input.now(),
+      expiresAt: computePromptExpiration(input.now()),
       createdAt: input.now()
     });
     updateSessionState(
@@ -305,6 +307,11 @@ async function handleRuntimeEvent(input: {
   if (input.event.type === 'turn.completed') {
     updateSessionState(input.deps.repositories, input.sessionId, SessionState.idle, input.now());
   }
+}
+
+function computePromptExpiration(nowValue: string): string {
+  const baseTime = Date.parse(nowValue);
+  return new Date((Number.isNaN(baseTime) ? Date.now() : baseTime) + PROMPT_TTL_MS).toISOString();
 }
 
 function appendEvent(

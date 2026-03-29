@@ -1,3 +1,4 @@
+import { parseAllowedRootsValue } from '../shared/config.js';
 import { startRunnerServer } from './http-server.js';
 import { createClaudeSdkAdapter } from './runtime/claude-sdk-adapter.js';
 import type { RuntimeAdapter } from './runtime/runtime-adapter.js';
@@ -17,6 +18,7 @@ export async function startLocalRunnerFromEnv(
 ) {
   const port = Number(env.RUNNER_PORT ?? env.PORT ?? '3000');
   const databasePath = env.RUNNER_DATABASE_PATH ?? ':memory:';
+  const allowedRoots = parseAllowedRootsValue(env.ALLOWED_ROOTS);
   const executablePath = env.CLAUDE_CODE_EXECUTABLE ?? env.CLAUDE_EXECUTABLE ?? 'claude';
   const debug = env.CLAUDE_DEBUG === '1' || env.CLAUDE_DEBUG === 'true';
   const debugFile = env.CLAUDE_DEBUG_FILE;
@@ -39,6 +41,7 @@ export async function startLocalRunnerFromEnv(
   return startServer({
     port,
     databasePath,
+    allowedRoots,
     runtime: createRuntime()
   });
 }
