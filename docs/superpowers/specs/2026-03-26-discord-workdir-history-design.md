@@ -2,14 +2,14 @@
 
 ## Goal
 
-Replace the current required free-form `cwd` entry in `/session-new` with a Discord-first workdir picker for a single machine. Users should be able to choose a saved workdir from local history or scan the machine for candidate project directories, then create the session from a click-driven flow.
+Replace the current required free-form `cwd` entry in `/session-new` with a Discord-first workdir picker for a single machine. Users should be able to choose a saved workdir from local history, scan the machine for candidate project directories, or manually enter a path, then review session options and create the session from a click-driven flow.
 
 The first version should stay inside Discord, store machine-local workdir history in the existing SQLite database, and keep all path access constrained to `ALLOWED_ROOTS`.
 
 ## Confirmed Product Decisions
 
 1. The primary UX lives in Discord rather than a browser page.
-2. `/session-new` should start with `history` or `search new`, rather than requiring a typed `cwd`.
+2. `/session-new` should start with `history`, `search new`, or manual path entry, rather than requiring a typed `cwd`.
 3. New directory discovery should start with filesystem scanning inside configured roots.
 4. Saved workdirs should be machine-local and stored in SQLite.
 5. A saved workdir has a display name; default it to the folder name, but allow custom naming.
@@ -30,12 +30,29 @@ This keeps the filesystem boundary out of the Discord process, reuses the curren
 - The bot replies with a compact wizard message containing at least:
   - `Use history`
   - `Search new`
+  - `Manual input`
+
+### Workdir Navigation
+
+- `Use history` and `Search new` both provide a `Back` action so the user can return to the source picker without restarting `/session-new`.
+- `Manual input` opens a modal where the user can paste a path directly.
+- Once a workdir is chosen, the wizard moves to a second review step rather than creating the session immediately.
+
+### Session Options Flow
+
+- After the workdir step, the bot shows an options review message with:
+  - `Model`
+  - `Effort`
+  - `Skills`
+  - `Create session`
+- Each option starts from a default value and can be left unchanged.
+- `Model`, `Effort`, and `Skills` can be edited one at a time, then the user returns to the same review step.
 
 ### History Flow
 
 - `Use history` opens a paginated list of saved workdirs.
 - Each option shows the display name first and the path second.
-- Selecting an item creates the session immediately if the path is still valid and allowed.
+- Selecting an item moves to the session options review step if the path is still valid and allowed.
 - If the path no longer exists, the bot should return a short message saying the directory is unavailable and offer the user a way back to the picker.
 
 ### Search-New Flow
@@ -46,13 +63,13 @@ This keeps the filesystem boundary out of the Discord process, reuses the curren
 - Selecting a scanned directory opens a naming step.
 - The default name is the directory basename.
 - The user may accept the default or submit a custom name.
-- Saving the entry immediately creates the session from that directory.
+- Saving the entry returns to the session options review step and `Create session` performs the final session creation.
 
 ### Visibility and Reuse
 
 - Saved workdirs are machine-level shared history, not per-user private history.
 - The saved list should be ordered by `last_used_at DESC`, then `display_name ASC`.
-- Each successful session creation from a saved or scanned entry updates `last_used_at` and increments `use_count`.
+- Each successful session creation from a saved, scanned, or manually entered entry updates `last_used_at` and increments `use_count` when the path is persisted.
 
 ## Data Model
 
@@ -152,7 +169,7 @@ Needed primitives:
 - button ids for the picker entry actions
 - string select menus for paginated history and scan results
 - buttons for pagination/back actions
-- one modal for custom display-name submission
+- modals for custom display-name submission, manual path input, and skills editing
 
 Interaction state should carry:
 
@@ -174,6 +191,8 @@ Only the initiating user should be allowed to interact with that wizard's button
 - If a saved or scanned path falls outside `ALLOWED_ROOTS`, treat it as unavailable.
 - If saving a workdir races with another save of the same path, upsert cleanly and continue.
 - If a component interaction becomes stale, reply with a concise refresh-safe message.
+- If runner event streaming fails transiently, reconnect and continue delivering output and permission prompts.
+- If a permission prompt has a long runtime prompt id, keep Discord button ids short and resolve against the stored prompt record.
 
 ## Testing Strategy
 
@@ -185,9 +204,13 @@ Add focused tests for:
 - Discord `/session-new` wizard entry flow
 - history selection creating a session with the stored path
 - scan selection plus rename creating a saved entry and then a session
+- manual path entry followed by the options review step
+- back navigation from history and scan pickers
 - default basename naming and custom-name override behavior
 - preserving an existing custom name when the same path is scanned again
 - wizard interaction ownership by initiating user
+- permission prompt delivery after transient event-stream failures
+- short-button approval flow resolving the correct stored permission prompt
 - stale and missing directory behaviors
 
 ## Out of Scope for First Version

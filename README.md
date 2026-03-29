@@ -49,7 +49,9 @@
 - `npm run discord` starts a real `discord.js` client, registers the `session-new` slash command, and uses the shared SQLite audit/binding data plus the HTTP runner client.
 - `/session-new` supports `name`, `cwd`, `model`, `effort`, and `skills`.
 - `name` is optional; when omitted or normalized to empty, the bot generates a short kebab-case fallback such as `pretty-fire` and uses it for the session display name and any newly created thread title.
-- `cwd` is optional. If omitted, Discord opens a picker with `Use history` for saved workdirs and `Search new` for fresh directory scans.
+- `cwd` is optional. If omitted, Discord opens a picker with `Use history`, `Search new`, and `Manual input` for the workdir step.
+- The history and search pickers both include `Back` so the user can return to the source picker without restarting the command.
+- After the workdir step, Discord shows a second review step for `Model`, `Effort`, `Skills`, and `Create session`; each option starts with a default value and can be left unchanged.
 - The history picker revalidates the selected path before creating the session.
 - The search flow paginates scan results, lets the user rename the saved entry or keep the default name, saves the workdir first, and then creates the session.
 - `effort` accepts `low`, `medium`, `high`, or `max` and is passed through to Claude Code query options.
@@ -57,3 +59,4 @@
 - Discord command actions are deny-by-default for RBAC; if both session-manager allowlists are empty, startup warns and session creation/prompt actions remain blocked.
 - Any supplied or selected workdir must still resolve inside `ALLOWED_ROOTS`; the bot resolves the matching allowed root and ignores any user attempt to widen access.
 - Runner and Discord control must point at the same `RUNNER_DATABASE_PATH` so restart recovery and thread bindings can be shared across processes.
+- Permission prompts now use short Discord button ids plus repository prompt lookup so approvals still work when Claude emits long runtime prompt ids, and the bot reconnects event streams after transient fetch failures.
